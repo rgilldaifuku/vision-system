@@ -1,0 +1,6 @@
+{
+    "profile_name":"yellow_daifuku",
+    "model_file": "best.pt",
+    "target_classes": ["yellow_daifuku"],
+    "confidence": 0.35
+}

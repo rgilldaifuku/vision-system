@@ -1,0 +1,10 @@
+{
+  "profile_name": "mouse",
+  "model_file": "latest/best.pt",
+  "latest_version": "v4",
+  "target_classes": [
+    "mouse"
+  ],
+  "confidence": 0.35,
+  "updated_at": "2026-05-21 07:40:46"
+}

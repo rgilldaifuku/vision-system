@@ -1,0 +1,6 @@
+path: C:\Users\MTC\Downloads\detection\datasets\my_items
+train: images/train
+val: images/val
+
+names:
+  0: yellow_daifuku

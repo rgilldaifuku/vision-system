@@ -1,0 +1,15 @@
+__pychache__/
+*.__pyc
+.venv/
+venv/
+
+runs/
+data/logs/
+data/review_images/
+C:/Temp/
+
+*.pt
+!models/*/classes.txt
+!models/*/config.json
+
+.DS_Store

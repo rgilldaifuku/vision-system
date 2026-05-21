@@ -1,0 +1,22 @@
+{
+  "model_name": "mouse",
+  "version": "v4",
+  "trained_at": "2026-05-21 07:40:46",
+  "dataset": {
+    "data_yaml": "C:\\Users\\rgill\\OneDrive - DNA\\detection\\data\\datasets\\mouse\\data.yaml",
+    "train_images": 2,
+    "val_images": 24,
+    "train_labels": 2,
+    "val_labels": 26
+  },
+  "training": {
+    "epochs": 50,
+    "image_size": 640,
+    "run_dir": "C:\\Temp\\detection_runs\\mouse",
+    "best_model": "C:\\Temp\\detection_runs\\mouse\\weights\\best.pt"
+  },
+  "deployment": {
+    "latest_model": "C:\\Users\\rgill\\OneDrive - DNA\\detection\\models\\mouse\\latest\\best.pt",
+    "compatibility_model": "C:\\Users\\rgill\\OneDrive - DNA\\detection\\models\\mouse\\best.pt"
+  }
+}
