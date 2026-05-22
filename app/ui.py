@@ -1,15 +1,52 @@
 import time
 import cv2
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QMainWindow,
-    QVBoxLayout, QWidget, QDoubleSpinBox, QComboBox
+    QVBoxLayout, QWidget, QDoubleSpinBox, QComboBox, QTabWidget,
+    QPushButton, QTextEdit, QLineEdit
 )
 
-from app.config import MODELS_DIR, get_available_model_profiles
+import subprocess
+
+from app.config import MODELS_DIR, get_available_model_profiles, PROJECT_ROOT
 from app.inference import AIInferenceThread, DEFAULT_CONFIDENCE
 
+from pathlib import Path
+from datetime import datetime
+
+class TrainingWorker(QThread):
+    log = Signal(str)
+    finished = Signal(bool)
+
+    def __init__(self, model_name, project_root):
+        super().__init__()
+        self.model_name = model_name
+        self.project_root = project_root
+
+    def run(self):
+        process = subprocess.Popen(
+            ["python", "training/train_pipeline.py"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(self.project_root),
+            bufsize=1,
+        )
+
+        process.stdin.write(self.model_name + "\n")
+        process.stdin.flush()
+        process.stdin.close()
+
+        for line in process.stdout:
+            self.log.emit(line.rstrip())
+
+        process.wait()
+        self.finished.emit(process.returncode == 0)                                                                
 
 class MainWindow(QMainWindow):
 
@@ -43,6 +80,86 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(30)
 
+    def _setup_train_tab(self):
+        layout = QVBoxLayout(self.train_tab)
+
+        self.train_model_input = QLineEdit()
+        self.train_model_input.setPlaceholderText("Enter model/dataset name, example: mouse")
+
+        self.train_button = QPushButton("Train Model")
+        self.train_button.clicked.connect(self.run_training_pipeline)
+
+        self.train_log = QTextEdit()
+        self.train_log.setReadOnly(True)
+
+        layout.addWidget(self.train_model_input)
+        layout.addWidget(self.train_button)
+        layout.addWidget(self.train_log)
+
+    def run_training_pipeline(self):
+        model_name = self.train_model_input.text().strip()
+
+        if not model_name:
+            self.train_log.append("Please enter a model/dataset name.")
+            return
+
+        self.train_button.setEnabled(False)
+        self.train_log.append(f"Starting training for: {model_name}")
+
+        self.training_worker = TrainingWorker(model_name, PROJECT_ROOT)
+        self.training_worker.log.connect(self.train_log.append)
+        self.training_worker.finished.connect(self.on_training_finished)
+        self.training_worker.start()
+
+    def on_training_finished(self, success):
+        self.train_button.setEnabled(True)
+
+        if success:
+            self.train_log.append("Training complete")
+        else:
+            self.train_log.append("Trainign failed")
+
+    def _setup_collect_tab(self):
+        layout = QVBoxLayout(self.collect_tab)
+
+        self.collect_name_input = QLineEdit()
+        self.collect_name_input.setPlaceholderText("Dataset/object name, example: mouse")
+
+        self.capture_button = QPushButton("Capture Training Image")
+        self.capture_button.clicked.connect(self.capture_training_image)
+
+        self.collect_status = QLabel("Images saved: 0")
+
+        layout.addWidget(self.collect_name_input)
+        layout.addWidget(self.capture_button)
+        layout.addWidget(self.collect_status)
+
+        self.captured_count = 0
+
+    def capture_training_image(self):
+        dataset_name = self.collect_name_input.text().strip().lower().replace(" ", "_")
+
+        if not dataset_name:
+            self.collect_status.setText("Please enter a dataset/object name.")
+            return
+
+        ret, frame = self.camera.read()
+
+        if not ret or frame is None:
+            self.collect_status.setText("Camara frame failed.")
+            return
+        
+        save_dir = PROJECT_ROOT / "data" / "datasets" / dataset_name / "images" / "train"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = save_dir / f"{dataset_name}_{timestamp}_{self.captured_count:04d}.jpg"
+
+        cv2.imwrite(str(filename), frame)
+
+        self.captured_count += 1
+        self.collect_status.setText(f"Images saved: {self.captured_count} | Last: {filename.name}")
+
     def _setup_ui(self):
         central = QWidget()
         self.model_selector = QComboBox()
@@ -51,6 +168,23 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        self.detect_tab = QWidget()
+        self.train_tab = QWidget()
+
+        self.tabs.addTab(self.detect_tab, "Detect")
+        self.tabs.addTab(self.train_tab, "Train Model")
+
+        self.collect_tab = QWidget()
+        self.tabs.addTab(self.collect_tab, "Collect Images")
+        self._setup_collect_tab()
+
+    
+
+        self._setup_train_tab()
 
         layout.addWidget(self.model_selector)
 
@@ -85,6 +219,8 @@ class MainWindow(QMainWindow):
         control.addWidget(self.status_label)
 
         layout.addLayout(control)
+
+
 
     def update_frame(self):
         ret, frame = self.camera.read()

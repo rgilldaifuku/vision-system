@@ -1,7 +1,7 @@
 {
   "model_name": "mouse",
-  "version": "v4",
-  "trained_at": "2026-05-21 07:40:46",
+  "version": "v8",
+  "trained_at": "2026-05-22 10:02:20",
   "dataset": {
     "data_yaml": "C:\\Users\\rgill\\OneDrive - DNA\\detection\\data\\datasets\\mouse\\data.yaml",
     "train_images": 2,
