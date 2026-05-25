@@ -221,7 +221,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(control)
 
 
-
     def update_frame(self):
         ret, frame = self.camera.read()
         if not ret:

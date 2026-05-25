@@ -41,6 +41,7 @@ def draw_detections(frame, results):
 
     sorted_indices = xyxy[:, 0].argsort()
 
+    # Draw and label bounding boxes
     for i, idx in enumerate(sorted_indices):
         bbox = xyxy[idx].astype(int)
         conf = confidences[idx]
@@ -107,6 +108,7 @@ class AIInferenceThread(QObject):
 
     def _run(self):
         while self.running:
+            # Get next frame
             frame_copy = None
 
             with self.lock:
@@ -118,6 +120,7 @@ class AIInferenceThread(QObject):
                 time.sleep(0.005)
                 continue
 
+            # Predict with YOLO model
             try:
                 results = self.model.predict(
                     frame_copy,
@@ -125,6 +128,7 @@ class AIInferenceThread(QObject):
                     verbose=False
                 )
 
+                # draw bounding boxes for detected objects
                 annotated, detected = draw_detections(frame_copy, results)
 
                 detections_found = False
