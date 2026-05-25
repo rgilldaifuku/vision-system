@@ -4,7 +4,6 @@ import json
 import cv2
 from ultralytics import YOLO
 from PySide6.QtCore import Signal, QObject
-from app.logging import log_detection
 from datetime import datetime
 from app.config import (
     REVIEW_IMAGES_DIR,
@@ -201,9 +200,6 @@ class AIInferenceThread(QObject):
         self.profile_dir = profile["profile_dir"]
         self.running = True
 
-        self.last_log_time = 0
-        self.log_cooldown_seconds = 2
-
         self.lock = threading.Lock()
 
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -234,6 +230,7 @@ class AIInferenceThread(QObject):
                 detections_found = False
                 best_class_name = None
                 best_confidence = None
+                saved_image_path = ""
 
                 for result in results:
                     for box in result.boxes:
@@ -255,20 +252,16 @@ class AIInferenceThread(QObject):
                             best_class_name = class_name
 
                         if confidence < LOW_CONFIDENCE_THRESHOLD:
-                            save_review_image(frame_copy,"low_confidence")
+                            saved_image_path = str(save_review_image(frame_copy, "low_confidence"))
 
                 if not detections_found:
-                    save_review_image(frame_copy, "no_detection")
-
-                current_time = time.time()
-
-                if current_time - self.last_log_time >= self.log_cooldown_seconds:
-                    log_detection(detected)
-                    self.last_log_time = current_time
+                    saved_image_path = str(save_review_image(frame_copy, "no_detection"))
 
                 metadata = {
                     "class_name": best_class_name,
                     "confidence": best_confidence,
+                    "roi_enabled": ROI_ENABLED,
+                    "saved_image_path": saved_image_path,
                 }
                 self.result_ready.emit(annotated, detected, metadata)
 
@@ -294,3 +287,4 @@ def save_review_image(frame, reason):
     filename = REVIEW_IMAGES_DIR / f"{timestamp}_{reason}.jpg"
 
     cv2.imwrite(str(filename), frame)
+    return filename

@@ -14,6 +14,7 @@ import sys
 
 from app.config import MODELS_DIR, get_available_model_profiles, PROJECT_ROOT
 from app.inference import AIInferenceThread
+from app.logging import log_detection_event
 
 from pathlib import Path
 from datetime import datetime
@@ -81,6 +82,8 @@ class MainWindow(QMainWindow):
         self.miss_frame_count = 0
         self.display_detected = False
         self.stable_detection_count = 0
+        self.detection_log_cooldown_seconds = 2.0
+        self.last_detection_log_time = 0
 
         self.frame_count = 0
         self.start_time = time.time()
@@ -440,6 +443,27 @@ class MainWindow(QMainWindow):
 
         return self.display_detected
 
+    def _log_detection_event(self, stable_detected, raw_detected, metadata):
+        now = time.time()
+        if now - self.last_detection_log_time < self.detection_log_cooldown_seconds:
+            return
+
+        self.last_detection_log_time = now
+
+        try:
+            log_detection_event(
+                active_profile=self.ai.profile_dir.name,
+                stable_detected=stable_detected,
+                raw_detected=raw_detected,
+                class_name=metadata.get("class_name") or "",
+                confidence=metadata.get("confidence"),
+                camera_status=self.camera_status,
+                roi_enabled=metadata.get("roi_enabled", False),
+                saved_image_path=metadata.get("saved_image_path") or "",
+            )
+        except Exception as e:
+            print(f"[WARNING] Detection log failed: {e}")
+
     def on_result_ready(self, frame, detected, metadata=None):
         display_detected = self._smooth_detection_state(detected)
         metadata = metadata or {}
@@ -462,6 +486,8 @@ class MainWindow(QMainWindow):
 
         if confidence is not None:
             self.last_confidence_label.setText(f"Last confidence: {confidence:.2f}")
+
+        self._log_detection_event(display_detected, detected, metadata)
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
@@ -505,6 +531,7 @@ class MainWindow(QMainWindow):
         self.detection_frame_count = 0
         self.miss_frame_count = 0
         self.display_detected = False
+        self.last_detection_log_time = 0
         self.profile_label.setText(f"Profile: {self.ai.profile_dir.name}")
         self.raw_status_label.setText("Raw: No")
         self.last_class_label.setText("Last class: N/A")
