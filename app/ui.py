@@ -58,12 +58,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("YOLO Detector")
 
         # Camera
-        self.camera = cv2.VideoCapture(camera_index)
-        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
-        if not self.camera.isOpened():
-            raise RuntimeError("Camera failed to open")
+        self.camera_index = camera_index
+        self.camera_failure_count = 0
+        self.camera_failure_threshold = 5
+        self.camera_reconnect_interval_seconds = 2.0
+        self.last_camera_reconnect_time = 0
+        self.camera_status = "Failed"
+        self.camera = self._open_camera()
+        self._set_camera_status("Connected" if self.camera.isOpened() else "Failed")
 
         # AI
         try: 
@@ -73,6 +75,12 @@ class MainWindow(QMainWindow):
         self.ai.result_ready.connect(self.on_result_ready)
 
         self.current_model = model_path
+        self.detection_required_frames = 3
+        self.miss_required_frames = 3
+        self.detection_frame_count = 0
+        self.miss_frame_count = 0
+        self.display_detected = False
+        self.stable_detection_count = 0
 
         self.frame_count = 0
         self.start_time = time.time()
@@ -82,6 +90,46 @@ class MainWindow(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(30)
+
+    def _open_camera(self):
+        camera = cv2.VideoCapture(self.camera_index)
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        return camera
+
+    def _set_camera_status(self, status):
+        self.camera_status = status
+
+        if not hasattr(self, "camera_status_label"):
+            return
+
+        self.camera_status_label.setText(f"Camera: {status}")
+
+        if status == "Connected":
+            self.camera_status_label.setStyleSheet("color:#0a0;")
+        elif status == "Reconnecting":
+            self.camera_status_label.setStyleSheet("color:#b80;")
+        else:
+            self.camera_status_label.setStyleSheet("color:#c00;")
+
+    def _attempt_camera_reconnect(self):
+        now = time.time()
+        if now - self.last_camera_reconnect_time < self.camera_reconnect_interval_seconds:
+            return
+
+        self.last_camera_reconnect_time = now
+        self._set_camera_status("Reconnecting")
+
+        if self.camera is not None:
+            self.camera.release()
+
+        self.camera = self._open_camera()
+
+        if self.camera.isOpened():
+            self.camera_failure_count = 0
+            self._set_camera_status("Connected")
+        else:
+            self._set_camera_status("Failed")
 
     def _setup_train_tab(self):
         layout = QVBoxLayout(self.train_tab)
@@ -246,7 +294,7 @@ class MainWindow(QMainWindow):
         self.model_selector = QComboBox()
         profiles = get_available_model_profiles()
         self.model_selector.addItems(profiles)
-        current_profile = Path(self.current_model).parent.name
+        current_profile = self.ai.profile_dir.name
         if current_profile in profiles:
             self.model_selector.setCurrentText(current_profile)
         self.model_selector.currentTextChanged.connect(self.change_model)
@@ -285,6 +333,11 @@ class MainWindow(QMainWindow):
 
         control = QHBoxLayout()
 
+        self.profile_label = QLabel(f"Profile: {self.ai.profile_dir.name}")
+        control.addWidget(self.profile_label)
+
+        control.addStretch()
+
         self.fps_label = QLabel("FPS: 0")
         control.addWidget(self.fps_label)
 
@@ -309,13 +362,51 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(control)
 
+        details = QHBoxLayout()
+
+        self.raw_status_label = QLabel("Raw: No")
+        details.addWidget(self.raw_status_label)
+
+        self.camera_status_label = QLabel(f"Camera: {self.camera_status}")
+        details.addWidget(self.camera_status_label)
+        self._set_camera_status(self.camera_status)
+
+        self.last_class_label = QLabel("Last class: N/A")
+        details.addWidget(self.last_class_label)
+
+        self.last_confidence_label = QLabel("Last confidence: N/A")
+        details.addWidget(self.last_confidence_label)
+
+        self.stable_count_label = QLabel("Stable detections: 0")
+        details.addWidget(self.stable_count_label)
+
+        details.addStretch()
+        layout.addLayout(details)
+
 
 
     def update_frame(self):
-        ret, frame = self.camera.read()
-        if not ret:
-            print("[WARNING] Camera frame failed")
+        read_error = None
+        try:
+            ret, frame = self.camera.read()
+        except Exception as e:
+            read_error = e
+            ret, frame = False, None
+
+        if not ret or frame is None:
+            if read_error:
+                print(f"[WARNING] Camera frame failed: {read_error}")
+            else:
+                print("[WARNING] Camera frame failed")
+            self.camera_failure_count += 1
+
+            if self.camera_failure_count >= self.camera_failure_threshold:
+                self._attempt_camera_reconnect()
+
             return
+
+        self.camera_failure_count = 0
+        self._set_camera_status("Connected")
 
         self.ai.submit_frame(frame)
 
@@ -328,13 +419,49 @@ class MainWindow(QMainWindow):
             self.frame_count = 0
             self.start_time = time.time()
 
-    def on_result_ready(self, frame, detected):
+    def _smooth_detection_state(self, detected):
+        was_detected = self.display_detected
+
         if detected:
+            self.detection_frame_count += 1
+            self.miss_frame_count = 0
+
+            if self.detection_frame_count >= self.detection_required_frames:
+                self.display_detected = True
+        else:
+            self.miss_frame_count += 1
+            self.detection_frame_count = 0
+
+            if self.miss_frame_count >= self.miss_required_frames:
+                self.display_detected = False
+
+        if not was_detected and self.display_detected:
+            self.stable_detection_count += 1
+
+        return self.display_detected
+
+    def on_result_ready(self, frame, detected, metadata=None):
+        display_detected = self._smooth_detection_state(detected)
+        metadata = metadata or {}
+
+        if display_detected:
             self.status_label.setText("Detected")
             self.status_label.setStyleSheet("background:#0f0; color:#000;")
         else:
             self.status_label.setText("Not Detected")
             self.status_label.setStyleSheet("background:#222; color:#888;")
+
+        self.raw_status_label.setText(f"Raw: {'Yes' if detected else 'No'}")
+        self.stable_count_label.setText(f"Stable detections: {self.stable_detection_count}")
+
+        class_name = metadata.get("class_name")
+        confidence = metadata.get("confidence")
+
+        if class_name:
+            self.last_class_label.setText(f"Last class: {class_name}")
+
+        if confidence is not None:
+            self.last_confidence_label.setText(f"Last confidence: {confidence:.2f}")
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
@@ -375,6 +502,15 @@ class MainWindow(QMainWindow):
 
         self.ai = AIInferenceThread(self.current_model)
         self.ai.result_ready.connect(self.on_result_ready)
+        self.detection_frame_count = 0
+        self.miss_frame_count = 0
+        self.display_detected = False
+        self.profile_label.setText(f"Profile: {self.ai.profile_dir.name}")
+        self.raw_status_label.setText("Raw: No")
+        self.last_class_label.setText("Last class: N/A")
+        self.last_confidence_label.setText("Last confidence: N/A")
+        self.status_label.setText("Not Detected")
+        self.status_label.setStyleSheet("background:#222; color:#888;")
         self.conf_spin.setValue(self.ai.confidence)
         self.conf_spin.valueChanged.connect(self.ai.set_confidence)
 
