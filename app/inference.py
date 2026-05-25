@@ -6,7 +6,15 @@ from ultralytics import YOLO
 from PySide6.QtCore import Signal, QObject
 from app.logging import log_detection
 from datetime import datetime
-from app.config import REVIEW_IMAGES_DIR, LOW_CONFIDENCE_THRESHOLD
+from app.config import (
+    REVIEW_IMAGES_DIR,
+    LOW_CONFIDENCE_THRESHOLD,
+    ROI_ENABLED,
+    ROI_X1,
+    ROI_Y1,
+    ROI_X2,
+    ROI_Y2,
+)
 from pathlib import Path
 
 # =============================
@@ -19,14 +27,54 @@ RAINBOW = [
     (0, 255, 0), (255, 0, 0), (130, 0, 75), (211, 0, 148)
 ]
 
+
+def _roi_values():
+    x1 = max(0.0, min(1.0, float(ROI_X1)))
+    y1 = max(0.0, min(1.0, float(ROI_Y1)))
+    x2 = max(0.0, min(1.0, float(ROI_X2)))
+    y2 = max(0.0, min(1.0, float(ROI_Y2)))
+    return min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+
+
+def _bbox_center_in_roi(bbox, frame_shape):
+    if not ROI_ENABLED:
+        return True
+
+    h, w = frame_shape[:2]
+    if w <= 0 or h <= 0:
+        return False
+
+    x1, y1, x2, y2 = _roi_values()
+    center_x = ((bbox[0] + bbox[2]) / 2) / w
+    center_y = ((bbox[1] + bbox[3]) / 2) / h
+
+    return x1 <= center_x <= x2 and y1 <= center_y <= y2
+
+
+def draw_roi(frame):
+    if not ROI_ENABLED:
+        return frame
+
+    output = frame.copy()
+    h, w = output.shape[:2]
+    x1, y1, x2, y2 = _roi_values()
+    left = max(0, min(w - 1, int(round(x1 * w))))
+    top = max(0, min(h - 1, int(round(y1 * h))))
+    right = max(0, min(w - 1, int(round(x2 * w))))
+    bottom = max(0, min(h - 1, int(round(y2 * h))))
+
+    cv2.rectangle(output, (left, top), (right, bottom), (255, 255, 255), 2)
+    return output
+
 # =============================
 # DETECTION DRAWING
 # =============================
 def draw_detections(frame, results, target_classes):
-    if not results or len(results[0].boxes) == 0:
-        return frame, False
+    output = draw_roi(frame)
 
-    output = frame.copy()
+    if not results or len(results[0].boxes) == 0:
+        return output, False
+
     _, w = frame.shape[:2]
 
     scale = max(0.5, w / 1600)
@@ -48,7 +96,7 @@ def draw_detections(frame, results, target_classes):
         name = results[0].names.get(cls, "OBJ")
         color = RAINBOW[i % len(RAINBOW)]
 
-        if name in target_classes:
+        if name in target_classes and _bbox_center_in_roi(bbox, frame.shape):
             found = True
 
         cv2.rectangle(output, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, thickness)
@@ -140,7 +188,7 @@ def load_model_profile(model_path):
 # AI THREAD
 # =============================
 class AIInferenceThread(QObject):
-    result_ready = Signal(object, bool)
+    result_ready = Signal(object, bool, object)
 
     def __init__(self, model_path):
         super().__init__()
@@ -184,6 +232,8 @@ class AIInferenceThread(QObject):
                 annotated, detected = draw_detections(frame_copy, results, self.target_classes)
 
                 detections_found = False
+                best_class_name = None
+                best_confidence = None
 
                 for result in results:
                     for box in result.boxes:
@@ -193,9 +243,16 @@ class AIInferenceThread(QObject):
                         if class_name not in self.target_classes:
                             continue
 
+                        bbox = box.xyxy[0].cpu().numpy()
+                        if not _bbox_center_in_roi(bbox, frame_copy.shape):
+                            continue
+
                         detections_found = True
 
                         confidence = float(box.conf[0])
+                        if best_confidence is None or confidence > best_confidence:
+                            best_confidence = confidence
+                            best_class_name = class_name
 
                         if confidence < LOW_CONFIDENCE_THRESHOLD:
                             save_review_image(frame_copy,"low_confidence")
@@ -209,7 +266,11 @@ class AIInferenceThread(QObject):
                     log_detection(detected)
                     self.last_log_time = current_time
 
-                self.result_ready.emit(annotated, detected)
+                metadata = {
+                    "class_name": best_class_name,
+                    "confidence": best_confidence,
+                }
+                self.result_ready.emit(annotated, detected, metadata)
 
             except Exception as e:
                 print(f"[ERROR] Inference failed: {e}")

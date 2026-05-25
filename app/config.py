@@ -18,6 +18,11 @@ CLASSES_PATH = ACTIVE_MODEL_DIR / "classes.txt"
 #Detection settings
 DEFAULT_CONFIDENCE = 0.65
 CAMARA_INDEX = 0
+ROI_ENABLED = False
+ROI_X1 = 0.0
+ROI_Y1 = 0.0
+ROI_X2 = 1.0
+ROI_Y2 = 1.0
 
 # Runtime Settings
 SAVE_REVIEW_IMAGES = True
