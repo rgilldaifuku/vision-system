@@ -1,0 +1,44 @@
+---
+# Ansible Playbook: Provision Raspberry Pi for Vision System Deployment
+# Usage: ansible-playbook -i ansible/inventory ansible/playbooks/provision-pi.yml
+#
+# Prerequisites
+# - SSH key-based auth set up to Pi
+# - Raspberry Pi OS 64-bit (Bullseye or Bookworm) installed
+# - Network connectivity to all Pis
+
+- name: Provision Raspberry Pi for Vision System
+  hosts: raspberrypis
+  become: yes
+  gather_facts: yes
+
+  vars_files:
+    - ../group_vars/raspberrypis.yml
+
+  pre_tasks:
+    - name: Print Pi target info
+      debug: 
+        msg: "Provisioning {{ inventory_hostname }} ({{ ansible_host }}) as {{ pi_hostname}}"
+
+  roles:
+    - system
+    - docker
+    - vision-system
+
+  post_tasks:
+    - name: Enable and start vision-system service
+      systemd:
+        name: vision-system
+        enabled: yes
+        state: started
+      become: yes
+
+    - name: Print deployment summary
+      debug:
+        msg: |
+        - {{ inventory_hostname }} provisioned successfully
+        - Hostname: {{ pi_hostname }}
+        - Docker: running
+        - Camera: {{ pi_camera_enabled }}
+        - Vision System: running
+        - View logs: sudo journalctl -u vision-system -f

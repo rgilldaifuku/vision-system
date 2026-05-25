@@ -1,0 +1,74 @@
+---
+# System role: Update OS, enable camera, set hostname, configure network
+
+- name: Set Pi hostname
+  hostname:
+    name: "{{ pi_hostname }}"
+  become: yes
+
+- name: Update system packages
+  apt:
+    update_cache: yes
+    upgrade: dist
+    autoclean: yes
+    autoremove: yes
+  become: yes
+
+- name: Install system dependencies for vision system
+  apt:
+    name:
+      - libatlas-base-dev
+      - libjpeg-dev
+      - libopenblas-dev
+      - libhardbuzz0b
+      - libwebp6
+      - git
+      - vim
+      - curl
+      - htop
+      - mosquitto-clients # Optional: MQTT for remote logging
+    state: present
+  become: yes
+
+- name: Enable Raspberry Pi Camera Interface (if using CSI camera)
+  block:
+    - name: Check if camera is enabled
+      shell: grep -q "dtparam=camera_auto_detect=on" /boot/config.txt || echo "NOT_FOUND"
+      register: camera_check
+      changed_when: false
+
+    - name: Enable camera in config.txt
+      lineinfile:
+        path: /boot/config.txt
+        line: "dtparam=camera_auto_detect=on"
+        state: present
+      when: pi_camera_enabled and camera_ckeck.stdout == "NOT_FOUND"
+      become: yes
+
+    - name: Notify reboot required
+      debug:
+        msg: "Camera enabled in config.txt/ Reboot required for changes to take effect."
+      when: pi_camera_enabled and camera_ckeck.stdout == "NOT_FOUND"
+  when: pi_camera_enabled
+
+- name: Set up log directory
+  file:
+    path: /var/log/vision-system
+    state: directory
+    owner: ansible
+    group: ansible
+    model: '0755'
+  become: yes
+
+- name: Create data directories
+  file: 
+    path: "/home/ansible/vision-system/data/{{ item }}"
+    state: directory
+    owner: ansible
+    group: ansible
+    mode: '0755'
+  loop:
+    - logs
+    - review_images
+    -dataset
+  become: yes

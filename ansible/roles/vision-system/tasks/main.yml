@@ -1,0 +1,77 @@
+---
+# Vision-system role: Deploy code, build container, create systemd service
+
+- name: Cline or update vision-system repository
+  git:
+    repo: "{{ vision_repo_url }}"
+    dest: /home/ansible/vision-system
+    version: main
+  become_user: ansible
+
+- name: Copy models to Pi (if using pre-trained models)
+  synchronize: 
+    src: "{{ playbook_dir }}/../../models/"
+    dest: /home/ansible/vision-system/models/
+    mode: push
+    delete: no
+  delegate_to: localhost
+  become: yes
+  become_user: ansible
+
+- name: Copy model to Pi (faster: ssh-based rsync)
+  command: >
+    rsync -avz --delete
+    {{ playbook_dir}}/../../models/
+    ansible@{{ ansible_host }}:home/ansible/vision-system/models/
+  delegate_to: localhost
+  become: no
+  changed_when: false
+
+- name: Build Docker image on Pi
+  community.docker.docker_image:
+    name: vision-system
+    tag: latest
+    source: build
+      path: /home/ansible/vision-system
+      dockerfile: Dockerfile
+      args:
+        PYTHON_VERSION: "3.11"
+  become: yes
+
+- name: Create systemd service for vision-system container
+  template: 
+    src: vision-system.service.j2
+    dest: /etc/systemd/system/vision-system.service
+    owner: root
+    group: root
+    mode: '0644'
+  become: yes
+  notify: reload systemd
+
+- name: Create docker-compose directory
+  file:
+    path: /home/ansible/vision_system
+    state: directory
+    owner: ansible
+    group: ansible
+  become: yes
+
+- name: Pull latest code
+  git:
+    repo: "{{ vision_repo_url }}"
+    dest: /home/ansible/vision-system
+    version: main
+    update: yes
+  become_user: ansible
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+  become: yes
+
+handlers:
+  -name: reload systemd
+  systemd: 
+    daemon_reload: yes
+  become: yes
+

@@ -1,0 +1,26 @@
+[Unit]
+Description=Vision System Object Detection Service
+After=docker.service network.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ansible
+WorkingDirectory=/home/pi/vision-system
+
+# Run docker-compose
+ExecStart=/usr/bin/docker-compose -f docker-compose.yml up
+
+# On failure, restart
+Restart=always
+RestartSec=10
+
+# Cleanup on stop
+ExecStop=/usr/bin/docker-compose -f docker-compose.yml down
+
+# Resource limits (optional)
+MemoryLimit=900M
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target

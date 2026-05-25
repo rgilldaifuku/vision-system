@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  vision-system:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_VERSION: "3.11"
+      image: vision-system:latest
+      container_name: vision-system
+
+    # For local testing withj camera (uncomment if you have a USB camera)
+
+    # devices:
+    #  - /dev/video0:/dev/video0
+    
+
+    # For Raspberry Pi withj SCI camera + hardware access
+    # Uncomment and adjust fort Pi:
+
+    # devices:
+    # - /dev/vchiq:/dev/vchiq
+    # - /dev/mem:/dev/mem
+    # privileged: true
+
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+
+    environment:
+      - LOG_LEVEL=INFO
+      - MODEL_PATH=/app/models/mouse/best.pt
+
+    # Headless mode (no display)
+    command: ["python", "-u", "app/headless_runner.py", "--model", "models/mouse/best"]
+
+    restart: unless-stopped
+
+    # For Pi: limit resources
+    # deploy:
+    #   resources: 
+    #     limits:
+    #       cpus: '2'
+    #       memory: 800M
+
+
+  # Optional: lightweight web server to view logs/images (for remote Pi access)
+  web-ui:
+    image: python:3.11-slim
+    container_name: vision-system-web
+    working_dir: /app/data
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    command: python -m http.server 8000 --directory /app/data
+    depends_on:
+      - vision-system
+    # Uncomment on Pi to expose externally:
+    # environment: 
+    #   - ALLOWED_HOSTS=*
+
+
