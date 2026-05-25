@@ -18,6 +18,105 @@ def count_files(folder, extensions):
         return 0
     return sum(1 for file in folder.iterdir() if file.suffix.lower() in extensions)
 
+def _to_float_or_none(value):
+    if value is None:
+        return None
+
+    try:
+        if hasattr(value, "item"):
+            value = value.item()
+        return round(float(value), 6)
+    except (TypeError, ValueError):
+        return None
+
+def _metric_from_dict(metrics_dict, keys):
+    for key in keys:
+        if key in metrics_dict:
+            value = _to_float_or_none(metrics_dict[key])
+            if value is not None:
+                return value
+    return None
+
+def extract_training_metrics(results):
+    metrics = {
+        "precision": None,
+        "recall": None,
+        "mAP50": None,
+        "mAP50-95": None,
+    }
+
+    if results is None:
+        return metrics
+
+    results_dict = getattr(results, "results_dict", None)
+    if isinstance(results_dict, dict):
+        metrics["precision"] = _metric_from_dict(
+            results_dict,
+            ["metrics/precision(B)", "metrics/precision", "precision"],
+        )
+        metrics["recall"] = _metric_from_dict(
+            results_dict,
+            ["metrics/recall(B)", "metrics/recall", "recall"],
+        )
+        metrics["mAP50"] = _metric_from_dict(
+            results_dict,
+            ["metrics/mAP50(B)", "metrics/mAP50", "mAP50", "map50"],
+        )
+        metrics["mAP50-95"] = _metric_from_dict(
+            results_dict,
+            ["metrics/mAP50-95(B)", "metrics/mAP50-95", "mAP50-95", "map"],
+        )
+
+    box_metrics = getattr(results, "box", None)
+    if box_metrics is not None:
+        if metrics["precision"] is None:
+            metrics["precision"] = _to_float_or_none(getattr(box_metrics, "mp", None))
+        if metrics["recall"] is None:
+            metrics["recall"] = _to_float_or_none(getattr(box_metrics, "mr", None))
+        if metrics["mAP50"] is None:
+            metrics["mAP50"] = _to_float_or_none(getattr(box_metrics, "map50", None))
+        if metrics["mAP50-95"] is None:
+            metrics["mAP50-95"] = _to_float_or_none(getattr(box_metrics, "map", None))
+
+    return metrics
+
+def _class_names_from_data_yaml(data_yaml):
+    try:
+        with open(data_yaml, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        return []
+
+    names = data.get("names") if isinstance(data, dict) else None
+
+    if isinstance(names, list):
+        return [str(name).strip() for name in names if str(name).strip()]
+
+    if isinstance(names, dict):
+        parsed = []
+        for raw_class_id, raw_name in names.items():
+            try:
+                class_id = int(raw_class_id)
+            except (TypeError, ValueError):
+                continue
+            parsed.append((class_id, str(raw_name).strip()))
+
+        return [name for _, name in sorted(parsed) if name]
+
+    return []
+
+def get_class_names(dataset_name, dataset_dir, data_yaml):
+    class_names = _class_names_from_data_yaml(data_yaml)
+    if class_names:
+        return class_names
+
+    for classes_path in (dataset_dir / "classes.txt", MODELS_DIR / dataset_name / "classes.txt"):
+        class_names = _read_classes_txt(classes_path)
+        if class_names:
+            return class_names
+
+    return []
+
 def _read_classes_txt(classes_path):
     if not classes_path.exists():
         return []
@@ -100,18 +199,47 @@ def _collect_labels(labels_dir):
         if label_path.is_file() and label_path.suffix.lower() == ".txt"
     }
 
-def _validate_label_file(label_path, allowed_class_ids, errors):
+def _increment_invalid_label(summary):
+    if summary is not None:
+        summary["invalid_labels"] += 1
+
+def _format_validation_failure(errors, summary):
+    lines = [
+        "Dataset validation failed.",
+        "",
+        "Summary:",
+        f"- Missing labels: {summary['missing_labels']}",
+        f"- Empty labels: {summary['empty_labels']}",
+        f"- Invalid labels: {summary['invalid_labels']}",
+        f"- Duplicate train/val files: {summary['duplicate_train_val']}",
+        "",
+        "Detailed errors:",
+    ]
+
+    shown_errors = errors[:100]
+    lines.extend(f"- {error}" for error in shown_errors)
+
+    if len(errors) > len(shown_errors):
+        lines.append(f"- ... and {len(errors) - len(shown_errors)} more error(s).")
+
+    return "\n".join(lines)
+
+def _validate_label_file(label_path, allowed_class_ids, errors, summary=None):
     text = label_path.read_text(encoding="utf-8", errors="replace")
 
     if not text.strip():
         errors.append(f"{label_path}: label file is empty.")
+        if summary is not None:
+            summary["empty_labels"] += 1
         return
 
     for line_number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
+        line_invalid = False
 
         if not stripped:
             errors.append(f"{label_path}: line {line_number}: blank label lines are not allowed.")
+            _increment_invalid_label(summary)
             continue
 
         if "," in stripped:
@@ -119,12 +247,14 @@ def _validate_label_file(label_path, allowed_class_ids, errors):
                 f"{label_path}: line {line_number}: contains a comma; "
                 "YOLO labels must be space-separated: class_id x_center y_center width height."
             )
+            line_invalid = True
 
         parts = stripped.split()
         if len(parts) != 5:
             errors.append(
                 f"{label_path}: line {line_number}: expected exactly 5 values, got {len(parts)}."
             )
+            _increment_invalid_label(summary)
             continue
 
         class_token = parts[0]
@@ -132,6 +262,7 @@ def _validate_label_file(label_path, allowed_class_ids, errors):
             class_id = int(class_token)
         except ValueError:
             errors.append(f"{label_path}: line {line_number}: class id '{class_token}' is not an integer.")
+            _increment_invalid_label(summary)
             continue
 
         if allowed_class_ids and class_id not in allowed_class_ids:
@@ -139,6 +270,7 @@ def _validate_label_file(label_path, allowed_class_ids, errors):
             errors.append(
                 f"{label_path}: line {line_number}: class id {class_id} is not in configured classes [{allowed}]."
             )
+            line_invalid = True
 
         for name, value_text in zip(("x_center", "y_center", "width", "height"), parts[1:]):
             try:
@@ -147,15 +279,21 @@ def _validate_label_file(label_path, allowed_class_ids, errors):
                 errors.append(
                     f"{label_path}: line {line_number}: {name} value '{value_text}' is not numeric."
                 )
+                line_invalid = True
                 continue
 
             if value < 0 or value > 1:
                 errors.append(
                     f"{label_path}: line {line_number}: {name} value {value_text} must be between 0 and 1."
                 )
+                line_invalid = True
 
-def write_training_report(dataset_name, version_name, run_dir, data_yaml):
+        if line_invalid:
+            _increment_invalid_label(summary)
+
+def write_training_report(dataset_name, version_name, run_dir, data_yaml, metrics=None):
     dataset_dir = DATASETS_DIR / dataset_name 
+    metrics = {**extract_training_metrics(None), **(metrics or {})}
 
     report = {
         "model_name": dataset_name,
@@ -167,6 +305,7 @@ def write_training_report(dataset_name, version_name, run_dir, data_yaml):
             "val_images": count_files(dataset_dir / "images" / "val", [".jpg", ".jpeg", ".png"]),
             "train_labels": count_files(dataset_dir / "labels" / "train", [".txt"]),
             "val_labels": count_files(dataset_dir / "labels" / "val", [".txt"]),
+            "classes": get_class_names(dataset_name, dataset_dir, data_yaml),
         },
         "training": {
             "epochs": 50,
@@ -174,6 +313,7 @@ def write_training_report(dataset_name, version_name, run_dir, data_yaml):
             "run_dir": str(run_dir),
             "best_model": str(run_dir / "weights" / "best.pt"),
         },
+        "metrics": metrics,
         "deployment": {
             "latest_model": str(MODELS_DIR / dataset_name / "latest" / "best.pt"),
             "compatibility_model": str(MODELS_DIR / dataset_name / "best.pt"),
@@ -197,13 +337,19 @@ def validate_dataset(dataset_name):
 
     required = [images_train, images_val, labels_train, labels_val, data_yaml]
     errors = []
+    summary = {
+        "missing_labels": 0,
+        "empty_labels": 0,
+        "invalid_labels": 0,
+        "duplicate_train_val": 0,
+    }
 
     for path in required: 
         if not path.exists():
             errors.append(f"Missing required path: {path}")
 
     if errors:
-        raise RuntimeError("Dataset validation failed:\n" + "\n".join(f"- {error}" for error in errors))
+        raise RuntimeError(_format_validation_failure(errors, summary))
 
     allowed_class_ids = _load_allowed_class_ids(dataset_name, dataset_dir, data_yaml, errors)
 
@@ -239,6 +385,7 @@ def validate_dataset(dataset_name):
         label_stems = set(labels_by_split[split_name])
 
         for stem in sorted(image_stems - label_stems):
+            summary["missing_labels"] += 1
             errors.append(
                 f"{split_name}: missing label for image '{images_by_split[split_name][stem].name}'."
             )
@@ -249,18 +396,15 @@ def validate_dataset(dataset_name):
             )
 
         for label_path in labels_by_split[split_name].values():
-            _validate_label_file(label_path, allowed_class_ids, errors)
+            _validate_label_file(label_path, allowed_class_ids, errors, summary)
 
     duplicate_stems = sorted(set(images_by_split["train"]) & set(images_by_split["val"]))
     for stem in duplicate_stems:
+        summary["duplicate_train_val"] += 1
         errors.append(f"Duplicate image stem across train and val: '{stem}'.")
 
     if errors:
-        shown_errors = errors[:100]
-        message = "Dataset validation failed:\n" + "\n".join(f"- {error}" for error in shown_errors)
-        if len(errors) > len(shown_errors):
-            message += f"\n- ... and {len(errors) - len(shown_errors)} more error(s)."
-        raise RuntimeError(message)
+        raise RuntimeError(_format_validation_failure(errors, summary))
 
     print("Dataset validation passed.")
     print(f"Train images: {train_images}")
@@ -285,7 +429,7 @@ def train_model(dataset_name, data_yaml):
         exist_ok=True,
     )
 
-    return Path(results.save_dir)
+    return Path(results.save_dir), extract_training_metrics(results)
 
 def get_next_version(profile_dir):
     versions_dir = profile_dir / "versions"
@@ -307,7 +451,7 @@ def get_next_version(profile_dir):
     next_number = max(version_numbers, default=0) + 1
     return f"v{next_number}"
 
-def update_model_profile(dataset_name, run_dir):
+def update_model_profile(dataset_name, run_dir, metrics=None):
     weights_dir = run_dir / "weights"
     best_model = weights_dir / "best.pt"
 
@@ -346,7 +490,13 @@ def update_model_profile(dataset_name, run_dir):
     with open(profile_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
-    write_training_report(dataset_name, version_name, run_dir, DATASETS_DIR / dataset_name / "data.yaml")
+    write_training_report(
+        dataset_name,
+        version_name,
+        run_dir,
+        DATASETS_DIR / dataset_name / "data.yaml",
+        metrics=metrics,
+    )
 
     print(f"Model profile updated: {profile_dir}")
     print(f"Created version: {version_name}")
@@ -366,8 +516,8 @@ def main():
         print(exc)
         raise SystemExit(1)
 
-    run_dir = train_model(dataset_name, data_yaml)
-    update_model_profile(dataset_name, run_dir)
+    run_dir, metrics = train_model(dataset_name, data_yaml)
+    update_model_profile(dataset_name, run_dir, metrics=metrics)
 
     print("Training pipeline complete")
     print(f"Active Model File: models/{dataset_name}/best.pt")

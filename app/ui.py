@@ -165,13 +165,38 @@ class MainWindow(QMainWindow):
         self.training_worker.finished.connect(self.on_training_finished)
         self.training_worker.start()
 
+    def _refresh_model_lists(self, selected_profile=None):
+        profiles = get_available_model_profiles()
+
+        current_profile = selected_profile or self.model_selector.currentText()
+        self.model_selector.blockSignals(True)
+        self.model_selector.clear()
+        self.model_selector.addItems(profiles)
+        if current_profile in profiles:
+            self.model_selector.setCurrentText(current_profile)
+        self.model_selector.blockSignals(False)
+
+        self.report_model_selector.clear()
+        self.report_model_selector.addItems(profiles)
+        if current_profile in profiles:
+            self.report_model_selector.setCurrentText(current_profile)
+
+        return profiles
+
     def on_training_finished(self, success):
         self.train_button.setEnabled(True)
 
         if success:
-            self.train_log.append("Training complete")
+            model_name = self.training_worker.model_name.strip().lower().replace(" ", "_")
+            self.train_log.append(f"Training complete. Loading latest model for: {model_name}")
+            profiles = self._refresh_model_lists(model_name)
+
+            if model_name in profiles:
+                self.change_model(model_name)
+            else:
+                self.train_log.append("Training completed, but the model profile was not found.")
         else:
-            self.train_log.append("Trainign failed")
+            self.train_log.append("Training failed. Review the validation summary above.")
 
     def _setup_reports_tab(self):
         layout = QVBoxLayout(self.reports_tab)
