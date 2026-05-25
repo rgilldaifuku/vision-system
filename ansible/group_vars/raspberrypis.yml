@@ -2,7 +2,7 @@
 # Group variables for all Raspberry Pi devices
 
 # Repository URL
-vision_repo_url: #github link
+vision_repo_url: https://github.com/rgilldaifuku/vision-system.git
 
 # Model Settings
 model_name: mouse
