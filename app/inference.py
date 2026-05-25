@@ -1,18 +1,17 @@
 import threading
 import time
+import json
 import cv2
 from ultralytics import YOLO
 from PySide6.QtCore import Signal, QObject
 from app.logging import log_detection
-import cv2
 from datetime import datetime
 from app.config import REVIEW_IMAGES_DIR, LOW_CONFIDENCE_THRESHOLD
-from app.config import TARGET_CLASSES          
+from pathlib import Path
 
 # =============================
 # CONFIG
 # =============================
-TARGET_CLASS_ID = 0
 DEFAULT_CONFIDENCE = 0.35
 
 RAINBOW = [
@@ -23,12 +22,12 @@ RAINBOW = [
 # =============================
 # DETECTION DRAWING
 # =============================
-def draw_detections(frame, results):
+def draw_detections(frame, results, target_classes):
     if not results or len(results[0].boxes) == 0:
         return frame, False
 
     output = frame.copy()
-    h, w = frame.shape[:2]
+    _, w = frame.shape[:2]
 
     scale = max(0.5, w / 1600)
     thickness = max(1, int(scale * 2))
@@ -49,7 +48,7 @@ def draw_detections(frame, results):
         name = results[0].names.get(cls, "OBJ")
         color = RAINBOW[i % len(RAINBOW)]
 
-        if cls == TARGET_CLASS_ID:
+        if name in target_classes:
             found = True
 
         cv2.rectangle(output, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, thickness)
@@ -83,6 +82,60 @@ def draw_detections(frame, results):
     return output, found
 
 
+def _resolve_profile_dir(model_path):
+    path = Path(model_path)
+    candidates = [path.parent]
+
+    if path.parent.name == "latest":
+        candidates.append(path.parent.parent)
+    elif path.parent.parent.name == "versions":
+        candidates.append(path.parent.parent.parent)
+
+    for candidate in candidates:
+        if (candidate / "config.json").exists() or (candidate / "classes.txt").exists():
+            return candidate
+
+    return path.parent
+
+
+def _load_classes(profile_dir):
+    classes_path = profile_dir / "classes.txt"
+    if not classes_path.exists():
+        return []
+
+    return [
+        line.strip()
+        for line in classes_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def load_model_profile(model_path):
+    profile_dir = _resolve_profile_dir(model_path)
+    config_path = profile_dir / "config.json"
+    config = {}
+
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+
+    classes = _load_classes(profile_dir)
+    target_classes = config.get("target_classes") or classes
+    target_classes = {str(name).strip() for name in target_classes if str(name).strip()}
+
+    try:
+        confidence = float(config.get("confidence", DEFAULT_CONFIDENCE))
+    except (TypeError, ValueError):
+        confidence = DEFAULT_CONFIDENCE
+
+    return {
+        "profile_dir": profile_dir,
+        "classes": classes,
+        "target_classes": target_classes,
+        "confidence": confidence,
+    }
+
+
 # =============================
 # AI THREAD
 # =============================
@@ -92,9 +145,12 @@ class AIInferenceThread(QObject):
     def __init__(self, model_path):
         super().__init__()
 
+        profile = load_model_profile(model_path)
         self.model = YOLO(model_path)
         self.frame = None
-        self.confidence = DEFAULT_CONFIDENCE
+        self.confidence = profile["confidence"]
+        self.target_classes = profile["target_classes"]
+        self.profile_dir = profile["profile_dir"]
         self.running = True
 
         self.last_log_time = 0
@@ -125,16 +181,16 @@ class AIInferenceThread(QObject):
                     verbose=False
                 )
 
-                annotated, detected = draw_detections(frame_copy, results)
+                annotated, detected = draw_detections(frame_copy, results, self.target_classes)
 
                 detections_found = False
 
                 for result in results:
                     for box in result.boxes:
                         cls_id = int(box.cls[0])
-                        class_name = result.names[cls_id]
+                        class_name = result.names.get(cls_id, str(cls_id))
 
-                        if class_name not in TARGET_CLASSES:
+                        if class_name not in self.target_classes:
                             continue
 
                         detections_found = True

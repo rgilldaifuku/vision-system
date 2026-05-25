@@ -10,9 +10,10 @@ from PySide6.QtWidgets import (
 )
 
 import subprocess
+import sys
 
 from app.config import MODELS_DIR, get_available_model_profiles, PROJECT_ROOT
-from app.inference import AIInferenceThread, DEFAULT_CONFIDENCE
+from app.inference import AIInferenceThread
 
 from pathlib import Path
 from datetime import datetime
@@ -29,7 +30,7 @@ class TrainingWorker(QThread):
 
     def run(self):
         process = subprocess.Popen(
-            ["python", "training/train_pipeline.py"],
+            [sys.executable, "training/train_pipeline.py"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -57,7 +58,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("YOLO Detector")
 
         # Camera
-        self.camera = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        self.camera = cv2.VideoCapture(camera_index)
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
@@ -243,7 +244,11 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         central = QWidget()
         self.model_selector = QComboBox()
-        self.model_selector.addItems(get_available_model_profiles())
+        profiles = get_available_model_profiles()
+        self.model_selector.addItems(profiles)
+        current_profile = Path(self.current_model).parent.name
+        if current_profile in profiles:
+            self.model_selector.setCurrentText(current_profile)
         self.model_selector.currentTextChanged.connect(self.change_model)
 
         self.setCentralWidget(central)
@@ -290,7 +295,7 @@ class MainWindow(QMainWindow):
 
         self.conf_spin = QDoubleSpinBox()
         self.conf_spin.setRange(0.05, 0.99)
-        self.conf_spin.setValue(DEFAULT_CONFIDENCE)
+        self.conf_spin.setValue(self.ai.confidence)
         self.conf_spin.valueChanged.connect(self.ai.set_confidence)
         control.addWidget(self.conf_spin)
 
@@ -359,12 +364,19 @@ class MainWindow(QMainWindow):
         self.current_model = str(model_path)
 
         try:
+            self.conf_spin.valueChanged.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+
+        try:
             self.ai.stop()
         except Exception:
             pass 
 
         self.ai = AIInferenceThread(self.current_model)
         self.ai.result_ready.connect(self.on_result_ready)
+        self.conf_spin.setValue(self.ai.confidence)
+        self.conf_spin.valueChanged.connect(self.ai.set_confidence)
 
     def closeEvent(self, event):
         self.ai.stop()
