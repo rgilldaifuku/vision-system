@@ -1,5 +1,6 @@
 import time
 import cv2
+import json
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
@@ -15,6 +16,7 @@ from app.inference import AIInferenceThread, DEFAULT_CONFIDENCE
 
 from pathlib import Path
 from datetime import datetime
+
 
 class TrainingWorker(QThread):
     log = Signal(str)
@@ -119,6 +121,84 @@ class MainWindow(QMainWindow):
         else:
             self.train_log.append("Trainign failed")
 
+    def _setup_reports_tab(self):
+        layout = QVBoxLayout(self.reports_tab)
+
+        self.report_model_selector = QComboBox()
+        self.report_model_selector.addItems(get_available_model_profiles())
+
+        self.refresh_report_button = QPushButton("Load Report")
+        self.refresh_report_button.clicked.connect(self.load_model_report)
+
+        self.report_output = QTextEdit()
+        self.report_output.setReadOnly(True)
+
+        layout.addWidget(self.report_model_selector)
+        layout.addWidget(self.refresh_report_button)
+        layout.addWidget(self.report_output)
+
+    def load_model_report(self):
+        model_name = self.report_model_selector.currentText()
+
+        if not model_name:
+            self.report_output.setText("No model selected.")
+            return
+
+        profile_dir = MODELS_DIR / model_name
+        config_path = profile_dir / "config.json"
+        report_path = profile_dir / "training_report.json"
+        versions_dir = profile_dir / "versions"
+
+        output = []
+        output.append(f"Model: {model_name}")
+        output.append("=" * 40)
+
+        if config_path.exists():
+            with open(config_path, "r") as f:
+                config = json.load(f)
+
+            output.append(f"Latest version: {config.get('latest_version', 'N/A')}")
+            output.append(f"Model file: {config.get('model_file', 'N/A')}")
+            output.append(f"Target classes: {config.get('target_classes', [])}")
+            output.append(f"Confidence: {config.get('confidence', 'N/A')}")
+            output.append(f"Updated at: {config.get('updated_at', 'N/A')}")
+        else:
+            output.append("No config.json found.")
+
+        output.append("")
+
+        if report_path.exists():
+            with open(report_path, "r") as f:
+                report = json.load(f)
+
+            dataset = report.get("dataset", {})
+            training = report.get("training", {})
+
+            output.append("Training Report")
+            output.append("-" * 40)
+            output.append(f"Trained at: {report.get('trained_at', 'N/A')}")
+            output.append(f"Version: {report.get('version', 'N/A')}")
+            output.append(f"Train images: {dataset.get('train_images', 'N/A')}")
+            output.append(f"Val images: {dataset.get('val_images', 'N/A')}")
+            output.append(f"Train labels: {dataset.get('train_labels', 'N/A')}")
+            output.append(f"Val labels: {dataset.get('val_labels', 'N/A')}")
+            output.append(f"Epochs: {training.get('epochs', 'N/A')}")
+            output.append(f"Image size: {training.get('image_size', 'N/A')}")
+            output.append(f"Run folder: {training.get('run_dir', 'N/A')}")
+        else:
+            output.append("No training_report.json found.")
+
+        output.append("")
+
+        if versions_dir.exists():
+            versions = [folder.name for folder in versions_dir.iterdir() if folder.is_dir()]
+            output.append("Available Versions")
+            output.append("-" * 40)
+            output.extend(versions if versions else ["No versions found."])
+
+        self.report_output.setText("\n".join(output))
+
+        
     def _setup_collect_tab(self):
         layout = QVBoxLayout(self.collect_tab)
 
@@ -181,6 +261,10 @@ class MainWindow(QMainWindow):
         self.collect_tab = QWidget()
         self.tabs.addTab(self.collect_tab, "Collect Images")
         self._setup_collect_tab()
+
+        self.reports_tab = QWidget()
+        self.tabs.addTab(self.reports_tab, "Reports / Versions")
+        self._setup_reports_tab()
 
     
 
