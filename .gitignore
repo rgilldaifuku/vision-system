@@ -1,5 +1,5 @@
 __pychache__/
-*.__pyc
+*.pyc
 .venv/
 venv/
 
@@ -9,6 +9,7 @@ data/review_images/
 C:/Temp/
 
 *.pt
+!models/**/*.pt
 !models/*/classes.txt
 !models/*/config.json
 
