@@ -6,3 +6,4 @@ torch
 torchvision
 PyYAML
 pyserial
+Flask
