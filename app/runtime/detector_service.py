@@ -26,8 +26,11 @@ BOX_COLORS = {
     "target": (24, 178, 107),
     "other": (240, 180, 41),
 }
-SNAPSHOT_REFRESH_MS = 2500
-SNAPSHOT_UPDATE_INTERVAL_SECONDS = SNAPSHOT_REFRESH_MS / 1000
+DEFAULT_IMGSZ = 320
+DEFAULT_FRAME_WIDTH = 640
+DEFAULT_FRAME_HEIGHT = 480
+DEFAULT_INFERENCE_INTERVAL_MS = 200
+DEFAULT_SNAPSHOT_INTERVAL_MS = 1000
 
 
 DASHBOARD_HTML = """
@@ -269,7 +272,7 @@ DASHBOARD_HTML = """
       </div>
       <div class="heartbeat">
         Status refresh: 1 second<br>
-        Image refresh: 2.5 seconds<br>
+        __SNAPSHOT_REFRESH_TEXT__<br>
         Browser updated: <span id="browser-updated">--</span>
       </div>
     </header>
@@ -285,7 +288,7 @@ DASHBOARD_HTML = """
       </div>
     </section>
 
-    <section class="image-panel">
+    <section id="image-panel" class="image-panel">
       <div class="image-header">
         <div class="label">Live Annotated Camera Frame</div>
         <div id="snapshot-status" class="snapshot-status">Waiting for frame</div>
@@ -311,12 +314,20 @@ DASHBOARD_HTML = """
         <div id="timestamp" class="value">--</div>
       </div>
       <div class="detail">
-        <div class="label">Runtime FPS</div>
-        <div id="runtime-fps" class="value">--</div>
+        <div class="label">Camera FPS</div>
+        <div id="camera-fps" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Inference FPS</div>
+        <div id="inference-fps" class="value">--</div>
       </div>
       <div class="detail">
         <div class="label">Last Inference</div>
         <div id="inference-ms" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Runtime Config</div>
+        <div id="runtime-config" class="value">--</div>
       </div>
     </section>
 
@@ -374,6 +385,13 @@ DASHBOARD_HTML = """
       return numberValue.toFixed(digits) + suffix;
     }
 
+    function formatRuntimeConfig(status) {
+      if (!status.frame_width || !status.frame_height || !status.imgsz) {
+        return "--";
+      }
+      return status.frame_width + "x" + status.frame_height + " / imgsz " + status.imgsz;
+    }
+
     function cameraState(status) {
       if (status === "Connected") {
         return "ok";
@@ -385,6 +403,10 @@ DASHBOARD_HTML = """
     }
 
     function refreshSnapshot() {
+      if (!SNAPSHOT_ENABLED) {
+        return;
+      }
+
       var image = document.getElementById("snapshot");
       image.onload = function() {
         setText("snapshot-status", "Live image updated");
@@ -425,8 +447,10 @@ DASHBOARD_HTML = """
         setText("class-name", latest.class_name || "--");
         setText("confidence", formatConfidence(latest.confidence));
         setText("timestamp", latest.timestamp || "--");
-        setText("runtime-fps", formatNumber(status.runtime_fps, 1, ""));
+        setText("camera-fps", formatNumber(status.camera_fps, 1, ""));
+        setText("inference-fps", formatNumber(status.inference_fps, 1, ""));
         setText("inference-ms", formatNumber(status.last_inference_ms, 0, " ms"));
+        setText("runtime-config", formatRuntimeConfig(status));
         setText("profile-name", status.profile_name || latest.profile_name || "--");
         setText("model-path", status.model_path || latest.model_path || "--");
         setText("browser-updated", new Date().toLocaleTimeString());
@@ -437,10 +461,19 @@ DASHBOARD_HTML = """
       }
     }
 
+    var SNAPSHOT_ENABLED = __SNAPSHOT_ENABLED__;
+    if (!SNAPSHOT_ENABLED) {
+      document.getElementById("image-panel").style.display = "none";
+    }
+
     refreshDashboard();
-    refreshSnapshot();
+    if (SNAPSHOT_ENABLED) {
+      refreshSnapshot();
+    }
     window.setInterval(refreshDashboard, 1000);
-    window.setInterval(refreshSnapshot, 2500);
+    if (SNAPSHOT_ENABLED) {
+      window.setInterval(refreshSnapshot, __SNAPSHOT_REFRESH_MS__);
+    }
   </script>
 </body>
 </html>
@@ -458,14 +491,32 @@ class RuntimeDetectorService:
         confidence=None,
         detection_required_frames=3,
         miss_required_frames=3,
+        imgsz=DEFAULT_IMGSZ,
+        frame_width=DEFAULT_FRAME_WIDTH,
+        frame_height=DEFAULT_FRAME_HEIGHT,
+        inference_interval_ms=DEFAULT_INFERENCE_INTERVAL_MS,
+        snapshot_interval_ms=DEFAULT_SNAPSHOT_INTERVAL_MS,
+        enable_snapshot=False,
     ):
         self.profile_name = profile_name
         self.model_path, self.profile_config, self.classes = self._resolve_model(profile_name, model_path)
         self.target_classes = self._load_target_classes()
         self.confidence = self._load_confidence(confidence)
+        self.imgsz = max(1, int(imgsz))
+        self.frame_width = max(1, int(frame_width))
+        self.frame_height = max(1, int(frame_height))
+        self.inference_interval_ms = max(0, int(inference_interval_ms))
+        self.snapshot_interval_ms = max(0, int(snapshot_interval_ms))
+        self.enable_snapshot = bool(enable_snapshot)
+        self.inference_interval_seconds = max(0.0, self.inference_interval_ms / 1000)
+        self.snapshot_interval_seconds = max(0.0, self.snapshot_interval_ms / 1000)
 
         self.model = YOLO(str(self.model_path))
-        self.camera = CameraManager(camera_index=camera_index)
+        self.camera = CameraManager(
+            camera_index=camera_index,
+            frame_width=self.frame_width,
+            frame_height=self.frame_height,
+        )
         self.inspection = InspectionLogic(
             target_classes=self.target_classes,
             detection_required_frames=detection_required_frames,
@@ -474,16 +525,23 @@ class RuntimeDetectorService:
         self.output_manager = OutputManager()
 
         self.running = False
-        self.thread = None
+        self.camera_thread = None
+        self.inference_thread = None
         self.lock = threading.Lock()
         self.frame_count = 0
+        self.camera_frame_count = 0
         self.last_error = ""
         self.started_at = None
         self.latest_detection = self._empty_detection()
         self.latest_snapshot_jpeg = None
         self.latest_snapshot_at = None
         self.last_snapshot_update_time = 0.0
-        self.last_frame_time = None
+        self.last_camera_frame_time = None
+        self.last_inference_time = None
+        self.last_inference_run_time = 0.0
+        self.latest_camera_frame = None
+        self.camera_fps = 0.0
+        self.inference_fps = 0.0
         self.runtime_fps = 0.0
         self.last_inference_ms = None
 
@@ -494,13 +552,16 @@ class RuntimeDetectorService:
         self.camera.open()
         self.running = True
         self.started_at = datetime.now().isoformat(timespec="seconds")
-        self.thread = threading.Thread(target=self._run_loop, daemon=True)
-        self.thread.start()
+        self.camera_thread = threading.Thread(target=self._camera_loop, daemon=True)
+        self.inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self.camera_thread.start()
+        self.inference_thread.start()
 
     def stop(self):
         self.running = False
-        if self.thread is not None:
-            self.thread.join(timeout=2.0)
+        for thread in (self.camera_thread, self.inference_thread):
+            if thread is not None:
+                thread.join(timeout=2.0)
         self.camera.release()
 
     def get_status(self):
@@ -515,8 +576,17 @@ class RuntimeDetectorService:
                 "confidence": self.confidence,
                 "camera_status": self.camera.status,
                 "frame_count": self.frame_count,
+                "camera_frame_count": self.camera_frame_count,
+                "camera_fps": self.camera_fps,
+                "inference_fps": self.inference_fps,
                 "runtime_fps": self.runtime_fps,
                 "last_inference_ms": self.last_inference_ms,
+                "frame_width": self.frame_width,
+                "frame_height": self.frame_height,
+                "imgsz": self.imgsz,
+                "inference_interval_ms": self.inference_interval_ms,
+                "snapshot_interval_ms": self.snapshot_interval_ms,
+                "snapshot_enabled": self.enable_snapshot,
                 "latest_snapshot_at": self.latest_snapshot_at,
                 "last_error": self.last_error,
                 "latest_detection": self.latest_detection,
@@ -527,27 +597,56 @@ class RuntimeDetectorService:
             return dict(self.latest_detection)
 
     def get_snapshot_jpeg(self):
+        if not self.enable_snapshot:
+            return None
+
         with self.lock:
             return self.latest_snapshot_jpeg
 
-    def _run_loop(self):
+    def _camera_loop(self):
         while self.running:
             frame = self.camera.read_frame()
 
             if frame is None:
-                detection = self.inspection.update([], (1, 1, 3))
-                self._update_latest(detection)
-                self.output_manager.handle_detection(
-                    active_profile=self.profile_name,
-                    detection=detection,
-                    camera_status=self.camera.status,
-                )
-                time.sleep(0.1)
+                with self.lock:
+                    self.latest_camera_frame = None
+                time.sleep(0.02)
+                continue
+
+            self._update_camera_timing()
+            with self.lock:
+                self.latest_camera_frame = frame
+
+    def _inference_loop(self):
+        while self.running:
+            frame = self._get_latest_camera_frame()
+
+            if frame is None:
+                if self._inference_due():
+                    self._mark_inference_started()
+                    detection = self.inspection.update([], (1, 1, 3))
+                    self._update_latest(detection)
+                    self.output_manager.handle_detection(
+                        active_profile=self.profile_name,
+                        detection=detection,
+                        camera_status=self.camera.status,
+                    )
+                time.sleep(0.02)
+                continue
+
+            if not self._inference_due():
+                time.sleep(0.005)
                 continue
 
             try:
+                self._mark_inference_started()
                 inference_started = time.perf_counter()
-                results = self.model.predict(frame, conf=self.confidence, verbose=False)
+                results = self.model.predict(
+                    frame,
+                    conf=self.confidence,
+                    imgsz=self.imgsz,
+                    verbose=False,
+                )
                 inference_ms = (time.perf_counter() - inference_started) * 1000
                 detections = self._extract_detections(results)
                 detection = self.inspection.update(detections, frame.shape)
@@ -565,6 +664,20 @@ class RuntimeDetectorService:
                 self._update_latest(self.inspection.snapshot())
                 time.sleep(0.1)
 
+    def _get_latest_camera_frame(self):
+        with self.lock:
+            if self.latest_camera_frame is None:
+                return None
+            return self.latest_camera_frame.copy()
+
+    def _inference_due(self):
+        if self.inference_interval_seconds <= 0:
+            return True
+        return time.monotonic() - self.last_inference_run_time >= self.inference_interval_seconds
+
+    def _mark_inference_started(self):
+        self.last_inference_run_time = time.monotonic()
+
     def _update_latest(self, detection):
         latest = {
             **detection,
@@ -578,26 +691,46 @@ class RuntimeDetectorService:
         with self.lock:
             self.latest_detection = latest
 
+    def _update_camera_timing(self):
+        now = time.perf_counter()
+
+        with self.lock:
+            if self.last_camera_frame_time is not None:
+                elapsed = now - self.last_camera_frame_time
+                if elapsed > 0:
+                    instant_fps = 1.0 / elapsed
+                    if self.camera_fps > 0:
+                        self.camera_fps = (self.camera_fps * 0.85) + (instant_fps * 0.15)
+                    else:
+                        self.camera_fps = instant_fps
+
+            self.last_camera_frame_time = now
+            self.camera_frame_count += 1
+
     def _update_runtime_timing(self, inference_ms):
         now = time.perf_counter()
 
         with self.lock:
-            if self.last_frame_time is not None:
-                elapsed = now - self.last_frame_time
+            if self.last_inference_time is not None:
+                elapsed = now - self.last_inference_time
                 if elapsed > 0:
                     instant_fps = 1.0 / elapsed
-                    if self.runtime_fps > 0:
-                        self.runtime_fps = (self.runtime_fps * 0.85) + (instant_fps * 0.15)
+                    if self.inference_fps > 0:
+                        self.inference_fps = (self.inference_fps * 0.85) + (instant_fps * 0.15)
                     else:
-                        self.runtime_fps = instant_fps
+                        self.inference_fps = instant_fps
 
-            self.last_frame_time = now
+            self.last_inference_time = now
             self.last_inference_ms = inference_ms
+            self.runtime_fps = self.inference_fps
             self.frame_count += 1
 
     def _maybe_update_snapshot(self, frame, detections, detection):
+        if not self.enable_snapshot:
+            return
+
         now = time.monotonic()
-        if now - self.last_snapshot_update_time < SNAPSHOT_UPDATE_INTERVAL_SECONDS:
+        if now - self.last_snapshot_update_time < self.snapshot_interval_seconds:
             return
 
         self.last_snapshot_update_time = now
@@ -769,7 +902,20 @@ def create_app(service):
 
     @app.get("/")
     def dashboard():
-        return DASHBOARD_HTML
+        snapshot_interval_ms = getattr(service, "snapshot_interval_ms", DEFAULT_SNAPSHOT_INTERVAL_MS)
+        snapshot_interval_seconds = snapshot_interval_ms / 1000
+        snapshot_enabled = bool(getattr(service, "enable_snapshot", False))
+        snapshot_refresh_text = (
+            f"Image refresh: {snapshot_interval_seconds:g} seconds"
+            if snapshot_enabled
+            else "Live image: disabled"
+        )
+        return (
+            DASHBOARD_HTML
+            .replace("__SNAPSHOT_REFRESH_MS__", str(snapshot_interval_ms))
+            .replace("__SNAPSHOT_REFRESH_TEXT__", snapshot_refresh_text)
+            .replace("__SNAPSHOT_ENABLED__", "true" if snapshot_enabled else "false")
+        )
 
     @app.get("/status")
     def status():
@@ -781,6 +927,9 @@ def create_app(service):
 
     @app.get("/snapshot.jpg")
     def snapshot():
+        if not getattr(service, "enable_snapshot", False):
+            return "Snapshot disabled", 404
+
         snapshot_jpeg = service.get_snapshot_jpeg()
         if snapshot_jpeg is None:
             return "No snapshot available", 503
@@ -804,6 +953,32 @@ def main():
     parser.add_argument("--confidence", type=float, default=None)
     parser.add_argument("--detection-required-frames", type=int, default=3)
     parser.add_argument("--miss-required-frames", type=int, default=3)
+    parser.add_argument("--imgsz", type=int, default=int(os.getenv("VISION_IMGSZ", DEFAULT_IMGSZ)))
+    parser.add_argument(
+        "--frame-width",
+        type=int,
+        default=int(os.getenv("VISION_FRAME_WIDTH", DEFAULT_FRAME_WIDTH)),
+    )
+    parser.add_argument(
+        "--frame-height",
+        type=int,
+        default=int(os.getenv("VISION_FRAME_HEIGHT", DEFAULT_FRAME_HEIGHT)),
+    )
+    parser.add_argument(
+        "--inference-interval-ms",
+        type=int,
+        default=int(os.getenv("VISION_INFERENCE_INTERVAL_MS", DEFAULT_INFERENCE_INTERVAL_MS)),
+    )
+    parser.add_argument(
+        "--snapshot-interval-ms",
+        type=int,
+        default=int(os.getenv("VISION_SNAPSHOT_INTERVAL_MS", DEFAULT_SNAPSHOT_INTERVAL_MS)),
+    )
+    parser.add_argument(
+        "--enable-snapshot",
+        action="store_true",
+        default=os.getenv("VISION_ENABLE_SNAPSHOT", "").lower() in {"1", "true", "yes", "on"},
+    )
     args = parser.parse_args()
 
     service = RuntimeDetectorService(
@@ -813,6 +988,12 @@ def main():
         confidence=args.confidence,
         detection_required_frames=args.detection_required_frames,
         miss_required_frames=args.miss_required_frames,
+        imgsz=args.imgsz,
+        frame_width=args.frame_width,
+        frame_height=args.frame_height,
+        inference_interval_ms=args.inference_interval_ms,
+        snapshot_interval_ms=args.snapshot_interval_ms,
+        enable_snapshot=args.enable_snapshot,
     )
     service.start()
 
