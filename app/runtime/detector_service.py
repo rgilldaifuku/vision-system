@@ -14,8 +14,10 @@ from app.config import (
     ACTIVE_MODEL_PROFILE,
     CAMERA_INDEX,
     DEFAULT_CONFIDENCE,
+    LOW_CONFIDENCE_THRESHOLD,
     MODELS_DIR,
     PROJECT_ROOT,
+    REVIEW_IMAGES_DIR,
 )
 from app.runtime.camera_manager import CameraManager
 from app.runtime.inspection_logic import InspectionLogic
@@ -31,6 +33,7 @@ DEFAULT_FRAME_WIDTH = 640
 DEFAULT_FRAME_HEIGHT = 480
 DEFAULT_INFERENCE_INTERVAL_MS = 200
 DEFAULT_SNAPSHOT_INTERVAL_MS = 1000
+DEFAULT_REVIEW_IMAGE_INTERVAL_SECONDS = 5.0
 
 
 DASHBOARD_HTML = """
@@ -329,6 +332,14 @@ DASHBOARD_HTML = """
         <div class="label">Runtime Config</div>
         <div id="runtime-config" class="value">--</div>
       </div>
+      <div class="detail">
+        <div class="label">Stable Detections</div>
+        <div id="total-detections" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Review Images</div>
+        <div id="review-images" class="value">--</div>
+      </div>
     </section>
 
     <section class="status-card">
@@ -383,6 +394,10 @@ DASHBOARD_HTML = """
         return String(value);
       }
       return numberValue.toFixed(digits) + suffix;
+    }
+
+    function countValue(value) {
+      return value === null || value === undefined || value === "" ? 0 : value;
     }
 
     function formatRuntimeConfig(status) {
@@ -451,6 +466,13 @@ DASHBOARD_HTML = """
         setText("inference-fps", formatNumber(status.inference_fps, 1, ""));
         setText("inference-ms", formatNumber(status.last_inference_ms, 0, " ms"));
         setText("runtime-config", formatRuntimeConfig(status));
+        setText("total-detections", countValue(status.total_detections));
+        setText(
+          "review-images",
+          countValue(status.total_images_saved) + " saved / " +
+          countValue(status.low_confidence_count) + " low / " +
+          countValue(status.no_detection_count) + " none"
+        );
         setText("profile-name", status.profile_name || latest.profile_name || "--");
         setText("model-path", status.model_path || latest.model_path || "--");
         setText("browser-updated", new Date().toLocaleTimeString());
@@ -544,6 +566,15 @@ class RuntimeDetectorService:
         self.inference_fps = 0.0
         self.runtime_fps = 0.0
         self.last_inference_ms = None
+        self.total_detections = 0
+        self.total_images_saved = 0
+        self.low_confidence_count = 0
+        self.no_detection_count = 0
+        self.last_review_image_times = {
+            "detections": 0.0,
+            "low_confidence": 0.0,
+            "no_detection": 0.0,
+        }
 
     def start(self):
         if self.running:
@@ -588,6 +619,10 @@ class RuntimeDetectorService:
                 "snapshot_interval_ms": self.snapshot_interval_ms,
                 "snapshot_enabled": self.enable_snapshot,
                 "latest_snapshot_at": self.latest_snapshot_at,
+                "total_detections": self.total_detections,
+                "total_images_saved": self.total_images_saved,
+                "low_confidence_count": self.low_confidence_count,
+                "no_detection_count": self.no_detection_count,
                 "last_error": self.last_error,
                 "latest_detection": self.latest_detection,
             }
@@ -650,6 +685,7 @@ class RuntimeDetectorService:
                 inference_ms = (time.perf_counter() - inference_started) * 1000
                 detections = self._extract_detections(results)
                 detection = self.inspection.update(detections, frame.shape)
+                detection = self._handle_review_images(frame, detection)
                 self._maybe_update_snapshot(frame, detections, detection)
                 self._update_runtime_timing(inference_ms)
                 self.last_error = ""
@@ -724,6 +760,120 @@ class RuntimeDetectorService:
             self.last_inference_ms = inference_ms
             self.runtime_fps = self.inference_fps
             self.frame_count += 1
+
+    def _handle_review_images(self, frame, detection):
+        detection = dict(detection)
+        detection["saved_image_path"] = ""
+        self._update_detection_count(detection)
+
+        saved_paths = []
+
+        if detection.get("stable_detected") and detection.get("raw_detected"):
+            saved_paths.append(
+                self._save_review_image(
+                    frame,
+                    "detections",
+                    detection.get("class_name"),
+                    detection.get("confidence"),
+                )
+            )
+
+        if self._is_low_confidence_detection(detection):
+            saved_paths.append(
+                self._save_review_image(
+                    frame,
+                    "low_confidence",
+                    detection.get("class_name"),
+                    detection.get("confidence"),
+                )
+            )
+
+        if not detection.get("raw_detected"):
+            saved_paths.append(self._save_review_image(frame, "no_detection"))
+
+        saved_paths = [str(path) for path in saved_paths if path]
+        if saved_paths:
+            detection["saved_image_path"] = saved_paths[-1]
+
+        return detection
+
+    def _update_detection_count(self, detection):
+        try:
+            stable_count = int(detection.get("stable_detection_count", 0))
+        except (TypeError, ValueError):
+            stable_count = 0
+
+        with self.lock:
+            self.total_detections = max(self.total_detections, stable_count)
+
+    def _is_low_confidence_detection(self, detection):
+        if not detection.get("raw_detected"):
+            return False
+
+        confidence = detection.get("confidence")
+        if confidence is None:
+            return False
+
+        try:
+            return float(confidence) < LOW_CONFIDENCE_THRESHOLD
+        except (TypeError, ValueError):
+            return False
+
+    def _save_review_image(self, frame, category, class_name=None, confidence=None):
+        if not self._review_image_due(category):
+            return None
+
+        output_dir = REVIEW_IMAGES_DIR / self.profile_name / category
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = self._review_image_filename(category, class_name, confidence)
+        output_path = output_dir / filename
+
+        if not cv2.imwrite(str(output_path), frame):
+            return None
+
+        with self.lock:
+            self.total_images_saved += 1
+            if category == "low_confidence":
+                self.low_confidence_count += 1
+            elif category == "no_detection":
+                self.no_detection_count += 1
+
+        return output_path
+
+    def _review_image_due(self, category):
+        now = time.monotonic()
+        last_saved = self.last_review_image_times.get(category, 0.0)
+
+        if now - last_saved < DEFAULT_REVIEW_IMAGE_INTERVAL_SECONDS:
+            return False
+
+        self.last_review_image_times[category] = now
+        return True
+
+    @staticmethod
+    def _review_image_filename(category, class_name=None, confidence=None):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        parts = [timestamp, category]
+
+        if class_name:
+            parts.append(RuntimeDetectorService._safe_filename_part(class_name))
+
+        if confidence is not None:
+            try:
+                parts.append(f"conf{float(confidence):.3f}")
+            except (TypeError, ValueError):
+                pass
+
+        return "_".join(parts) + ".jpg"
+
+    @staticmethod
+    def _safe_filename_part(value):
+        cleaned = "".join(
+            character if character.isalnum() or character in {"-", "_"} else "_"
+            for character in str(value).strip()
+        )
+        return cleaned or "unknown"
 
     def _maybe_update_snapshot(self, frame, detections, detection):
         if not self.enable_snapshot:
