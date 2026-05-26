@@ -52,7 +52,7 @@ def main():
     class_names = [c.strip() for c in classes_input.split(",") if c.strip()]
 
     if not class_names: 
-        print("At lest one class is required.")
+        print("At least one class is required.")
         return
 
     print("Classes: ")
@@ -70,7 +70,7 @@ def main():
         return
 
     print("Controls:")
-    print("Drage mouse = draw box")
+    print("Drag mouse = draw box")
     print("S = save label")
     print(" U = undo last box")
     print("Q = quit")

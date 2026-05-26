@@ -18,10 +18,10 @@ def main():
     save_dir = DATASETS_DIR / object_name / "images" / "train"
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    camara = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
-    if not camara.isOpened():
-        print("ERROR: Camara failed to open.")
+    if not camera.isOpened():
+        print("ERROR: Camera failed to open.")
         return
 
     print(f"Saving images to: {save_dir}")
@@ -31,10 +31,10 @@ def main():
     count = len(list(save_dir.glob("*.jpg")))
 
     while True: 
-        ret, frame = camara.read()
+        ret, frame = camera.read()
 
         if not ret:
-            print("WARNING: failed to read camara frame.")
+            print("WARNING: failed to read camera frame.")
             continue
 
         preview = frame.copy()
@@ -62,7 +62,7 @@ def main():
             count += 1
             print(f"Saved: {filename}")
 
-    camara.release()
+    camera.release()
     cv2.destroyAllWindows()
     print("Image collection finished.")
 

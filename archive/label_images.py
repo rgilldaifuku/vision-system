@@ -54,7 +54,7 @@ def main():
         return
 
     print("Controls:")
-    print("Drage mouse = draw box")
+    print("Drag mouse = draw box")
     print("S = save label")
     print(" U = undo last box")
     print("Q = quit")

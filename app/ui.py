@@ -303,7 +303,7 @@ class MainWindow(QMainWindow):
         ret, frame = self.camera.read()
 
         if not ret or frame is None:
-            self.collect_status.setText("Camara frame failed.")
+            self.collect_status.setText("Camera frame failed.")
             return
         
         save_dir = PROJECT_ROOT / "data" / "datasets" / dataset_name / "images" / "train"

@@ -1,23 +1,23 @@
 from pathlib import Path 
 
-#project root = detection folder
+# Project root = detection folder
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_ROOT / "models"
 DATA_DIR = PROJECT_ROOT /"data"
 LOGS_DIR = DATA_DIR / "logs"
 REVIEW_IMAGES_DIR = DATA_DIR /"review_images"
 
-#Model
+# Model
 ACTIVE_MODEL_PROFILE = "mouse"
 ACTIVE_MODEL_DIR = MODELS_DIR / ACTIVE_MODEL_PROFILE
 DEFAULT_MODEL_PATH = ACTIVE_MODEL_DIR / "best.pt"
 MODEL_CONFIG_PATH = ACTIVE_MODEL_DIR / "config.json"
 CLASSES_PATH = ACTIVE_MODEL_DIR / "classes.txt"
-#DEFAULT_MODEL_PATH = MODELS_DIR / ACTIVE_MODEL_PROFILE / "best.pt
+# DEFAULT_MODEL_PATH = MODELS_DIR / ACTIVE_MODEL_PROFILE / "best.pt"
 
-#Detection settings
+# Detection settings
 DEFAULT_CONFIDENCE = 0.65
-CAMARA_INDEX = 0
+CAMERA_INDEX = 0
 ROI_ENABLED = False
 ROI_X1 = 0.0
 ROI_Y1 = 0.0
@@ -29,7 +29,7 @@ SAVE_REVIEW_IMAGES = True
 SAVE_LOW_CONFIDENCE_IMAGES = True
 LOW_CONFIDENCE_THRESHOLD = 0.65
 
-#Ui
+# UI
 
 WINDOW_TITLE = "Production Image Detection System"
 
