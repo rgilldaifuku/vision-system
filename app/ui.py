@@ -412,7 +412,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(details)
 
 
-
     def update_frame(self):
         read_error = None
         try:

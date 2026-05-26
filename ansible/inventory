@@ -1,0 +1,14 @@
+[all:vars]
+ansible_user=ansible
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_private_key_file=~/.ssh/id_rsa_pi
+# tenant=jervis
+# mqtt_url_1=mqtt://a1c3613dwocyh8-ats.iot.us-east-1.amazonaws.com:8883
+# mqtt_cert_dir_1=/ansible/certs/dmca-prod/
+
+
+[raspberrypis]
+# example_pi_name ansible_host=<Hardware ID or IP>
+
+
+

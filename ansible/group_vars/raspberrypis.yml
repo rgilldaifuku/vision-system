@@ -1,0 +1,35 @@
+---
+# Group variables for all Raspberry Pi devices
+
+# Repository URL
+vision_repo_url: https://github.com/rgilldaifuku/vision-system.git
+
+# Model Settings
+model_name: mouse
+model_path: /home/ansible/vision-system/models/{{ model_name }}/best.pt
+
+# Camera Settings
+camera_dvice: /dev/video0
+pi_camera_enabled: true
+
+# Docker Settings
+docker_registry: docker.io
+image_name: vision-system
+image-tag: latest
+
+# Inferewnce Settings
+inference_confidence_threshold: 0.35
+inference_batch_size: 1
+
+# Loggin
+log_level: INFO
+log_dir: /var/log/vision-system
+
+# Performance tuning for Pi 4
+docker_memory_limit: 900M
+docker_cpu_quota: 80%
+
+# Netowrk (optional: for remote logging)
+mqtt_broker_host: ""
+mqtt_broker_port: 1883
+mqtt_anabled: false

@@ -13,4 +13,79 @@ C:/Temp/
 !models/*/classes.txt
 !models/*/config.json
 
+# Dependencies
+node_modules/
+.npm
+.yarn
+.pnpm*
+
+# SST
+.sst/
+.open-next/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Certificates
+*.pem
+*.csr
+*.p12
+*.pfx
+*.key
+!ansible/certs/example/*
+
+# Ansible
+ansible/secrets.yaml
+
+# AWS
+.aws/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# OS
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+
+sandbox/
+
+# Disk images
+*.img
+*.img.xz
+*.img.gz
+*.iso
+*.iso.xz
+*.iso.gz

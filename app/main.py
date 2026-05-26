@@ -5,12 +5,14 @@ from app.config import DEFAULT_MODEL_PATH
 from pathlib import Path
 
 if __name__ == "__main__":
+    #Parse Arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=str(DEFAULT_MODEL_PATH), help="Path to model")
     parser.add_argument("--camera", type=int, default=0)
 
     args = parser.parse_args()
 
+    #Validate Model path
     model_path = Path(args.model)
 
     if not model_path.exists():
@@ -18,6 +20,7 @@ if __name__ == "__main__":
 
     print(f"[INFO] Using model: {model_path}")
 
+    #Start GUI
     app = QApplication([])
     window = MainWindow(args.model, args.camera)
     window.show()

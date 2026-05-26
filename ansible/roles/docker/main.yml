@@ -1,0 +1,42 @@
+---
+# Docker role: Install Docker and Docker Compose on Raspberry Pi
+
+- name: Add Docker GPG key
+  apt_key:
+    url: https://download.docker.com/linum/raspbian/gpg
+    state: present
+  become: yes
+
+- name: Add Docker repository
+  apt_repository:
+    repo: "deb [arch=armhf] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+    state: present
+  become: yes
+
+- name: Install Docker and dependencies
+  apt: 
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Add pi user to docker group
+  user: 
+    name: pi
+    groups: docker
+    append: yes
+  become: yes
+
+- name: Verify Docker installation
+  shell: docker --version
+  register: docker_version
+  changed_when: false
+
+- name: Print Docker version
+  debug: 
+    msg: "Docker installed: {{ docker_version.stdout }}"
