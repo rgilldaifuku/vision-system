@@ -1,9 +1,11 @@
-from datetime import datetime
 import csv 
+import json
+from datetime import datetime
 
 from app.config import LOGS_DIR
 
 LOG_FILE = LOGS_DIR /"detections.csv"
+RUNTIME_EVENT_LOG_FILE = LOGS_DIR / "runtime_events.csv"
 
 LOG_FIELDS = [
     "timestamp",
@@ -15,6 +17,13 @@ LOG_FIELDS = [
     "camera_status",
     "roi_enabled",
     "saved_image_path",
+]
+RUNTIME_EVENT_FIELDS = [
+    "timestamp",
+    "event_type",
+    "profile",
+    "message",
+    "details_json",
 ]
 
 
@@ -44,6 +53,26 @@ def _ensure_log_file():
 
     with open(LOG_FILE, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
+        writer.writeheader()
+
+
+def _ensure_runtime_event_log_file():
+    RUNTIME_EVENT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    if RUNTIME_EVENT_LOG_FILE.exists():
+        with open(RUNTIME_EVENT_LOG_FILE, "r", newline="", encoding="utf-8") as f:
+            header = next(csv.reader(f), None)
+
+        if header == RUNTIME_EVENT_FIELDS:
+            return
+
+        legacy_path = RUNTIME_EVENT_LOG_FILE.with_name(
+            f"runtime_events_legacy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        RUNTIME_EVENT_LOG_FILE.rename(legacy_path)
+
+    with open(RUNTIME_EVENT_LOG_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=RUNTIME_EVENT_FIELDS)
         writer.writeheader()
 
 
@@ -87,6 +116,22 @@ def log_detection_event(
 
     with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
+        writer.writerow(row)
+
+
+def log_runtime_event(event_type, profile="", message="", details=None):
+    _ensure_runtime_event_log_file()
+
+    row = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "event_type": event_type,
+        "profile": profile or "",
+        "message": message or "",
+        "details_json": json.dumps(details or {}, sort_keys=True),
+    }
+
+    with open(RUNTIME_EVENT_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=RUNTIME_EVENT_FIELDS)
         writer.writerow(row)
 
 

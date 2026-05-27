@@ -1,0 +1,15 @@
+profile_name: yellow_daifuku
+inspection:
+  acceptable_classes:
+    - yellow_daifuku
+  reject_classes: []
+  minimum_confidence: 0.35
+  required_consecutive_detections: 3
+  allowed_no_detection_frames: 3
+  allow_simulation: true
+  roi:
+    enabled: false
+    x1: 0.0
+    y1: 0.0
+    x2: 1.0
+    y2: 1.0

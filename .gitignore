@@ -4,6 +4,7 @@ __pycache__/
 venv/
 
 runs/
+data/runs/
 data/logs/
 data/review_images/
 C:/Temp/

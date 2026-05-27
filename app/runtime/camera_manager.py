@@ -28,21 +28,32 @@ class CameraManager:
         self.status = self.FAILED
         self.failure_count = 0
         self.last_reconnect_attempt = 0.0
+        self.last_error = ""
 
     def open(self):
         self.release()
-        self.capture = cv2.VideoCapture(self.camera_index)
 
-        if self.frame_width:
-            self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.frame_width))
-        if self.frame_height:
-            self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.frame_height))
+        try:
+            self.capture = cv2.VideoCapture(self.camera_index)
+
+            if self.frame_width:
+                self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.frame_width))
+            if self.frame_height:
+                self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.frame_height))
+            self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.status = self.FAILED
+            self.release()
+            return False
 
         if self.capture.isOpened():
             self.status = self.CONNECTED
             self.failure_count = 0
+            self.last_error = ""
             return True
 
+        self.release()
         self.status = self.FAILED
         return False
 
@@ -54,12 +65,14 @@ class CameraManager:
 
         try:
             ok, frame = self.capture.read()
-        except Exception:
+        except Exception as exc:
+            self.last_error = str(exc)
             ok, frame = False, None
 
         if ok and frame is not None:
             self.status = self.CONNECTED
             self.failure_count = 0
+            self.last_error = ""
             return frame
 
         self.failure_count += 1
@@ -82,4 +95,3 @@ class CameraManager:
         if self.capture is not None:
             self.capture.release()
             self.capture = None
-

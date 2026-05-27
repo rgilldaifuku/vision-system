@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import shutil
 import yaml
 from datetime import datetime
@@ -7,7 +8,7 @@ from datetime import datetime
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATASETS_DIR = PROJECT_ROOT / "data" / "datasets"
 MODELS_DIR = PROJECT_ROOT / "models"
-RUNS_DIR = Path("C:/Temp/detection_runs")
+RUNS_DIR = Path(os.getenv("VISION_RUNS_DIR", PROJECT_ROOT / "data" / "runs"))
 IMG_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
 def clean_name(name):

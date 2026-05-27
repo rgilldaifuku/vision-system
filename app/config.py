@@ -36,6 +36,9 @@ WINDOW_TITLE = "Production Image Detection System"
 TARGET_CLASSES = ["mouse"]
 
 def get_available_model_profiles():
+    if not MODELS_DIR.exists():
+        return []
+
     return [
         folder.name
         for folder in MODELS_DIR.iterdir()

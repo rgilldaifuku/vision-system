@@ -20,7 +20,7 @@
       - libatlas-base-dev
       - libjpeg-dev
       - libopenblas-dev
-      - libhardbuzz0b
+      - libharfbuzz0b
       - libwebp6
       - git
       - vim
@@ -42,13 +42,13 @@
         path: /boot/config.txt
         line: "dtparam=camera_auto_detect=on"
         state: present
-      when: pi_camera_enabled and camera_ckeck.stdout == "NOT_FOUND"
+      when: pi_camera_enabled and camera_check.stdout == "NOT_FOUND"
       become: yes
 
     - name: Notify reboot required
       debug:
-        msg: "Camera enabled in config.txt/ Reboot required for changes to take effect."
-      when: pi_camera_enabled and camera_ckeck.stdout == "NOT_FOUND"
+        msg: "Camera enabled in config.txt. Reboot required for changes to take effect."
+      when: pi_camera_enabled and camera_check.stdout == "NOT_FOUND"
   when: pi_camera_enabled
 
 - name: Set up log directory
@@ -57,7 +57,7 @@
     state: directory
     owner: ansible
     group: ansible
-    model: '0755'
+    mode: '0755'
   become: yes
 
 - name: Create data directories
@@ -70,5 +70,5 @@
   loop:
     - logs
     - review_images
-    -dataset
+    - datasets
   become: yes

@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime
+import argparse
 import cv2
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -9,6 +10,10 @@ def clean_name(name):
     return name.strip().lower().replace(" ", "_")
 
 def main():
+    parser = argparse.ArgumentParser(description="Collect training images from a camera.")
+    parser.add_argument("--camera", type=int, default=0, help="Camera index, default 0.")
+    args = parser.parse_args()
+
     object_name = clean_name(input("Object name to collect images for: "))
 
     if not object_name:
@@ -18,7 +23,7 @@ def main():
     save_dir = DATASETS_DIR / object_name / "images" / "train"
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    camera = cv2.VideoCapture(args.camera)
 
     if not camera.isOpened():
         print("ERROR: Camera failed to open.")

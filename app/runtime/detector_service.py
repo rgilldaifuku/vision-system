@@ -1,14 +1,23 @@
 import argparse
 import json
 import os
+import sys
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
 import cv2
+import yaml
 from flask import Flask, Response, jsonify
-from ultralytics import YOLO
+
+try:
+    from ultralytics import YOLO
+except Exception as exc:
+    YOLO = None
+    YOLO_IMPORT_ERROR = exc
+else:
+    YOLO_IMPORT_ERROR = None
 
 from app.config import (
     ACTIVE_MODEL_PROFILE,
@@ -18,8 +27,14 @@ from app.config import (
     MODELS_DIR,
     PROJECT_ROOT,
     REVIEW_IMAGES_DIR,
+    ROI_ENABLED,
+    ROI_X1,
+    ROI_X2,
+    ROI_Y1,
+    ROI_Y2,
 )
 from app.runtime.camera_manager import CameraManager
+from app.runtime.camera_sources import SimulatedCameraSource
 from app.runtime.inspection_logic import InspectionLogic
 from app.runtime.output_manager import OutputManager
 
@@ -34,6 +49,14 @@ DEFAULT_FRAME_HEIGHT = 480
 DEFAULT_INFERENCE_INTERVAL_MS = 200
 DEFAULT_SNAPSHOT_INTERVAL_MS = 1000
 DEFAULT_REVIEW_IMAGE_INTERVAL_SECONDS = 5.0
+PROFILE_CONFIGS_DIR = PROJECT_ROOT / "profiles"
+MODEL_STATUS_LOADED = "Loaded"
+MODEL_STATUS_ERROR = "Error"
+MODEL_STATUS_SIMULATION = "Simulation"
+
+
+class ProfileConfigError(ValueError):
+    """Raised when runtime profile configuration is present but invalid."""
 
 
 DASHBOARD_HTML = """
@@ -286,7 +309,7 @@ DASHBOARD_HTML = """
         <div id="camera-status" class="value">Loading</div>
       </div>
       <div id="stable-box" class="status-box bad">
-        <div class="label">Stable Detection</div>
+        <div class="label">Inspection Result</div>
         <div id="stable-status" class="value">Loading</div>
       </div>
     </section>
@@ -305,12 +328,20 @@ DASHBOARD_HTML = """
         <div id="raw-status" class="badge warn">Loading</div>
       </div>
       <div class="detail">
-        <div class="label">Last Class</div>
+        <div class="label">Active Class</div>
         <div id="class-name" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Model Status</div>
+        <div id="model-status" class="value">--</div>
       </div>
       <div class="detail">
         <div class="label">Confidence</div>
         <div id="confidence" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Result Message</div>
+        <div id="result-message" class="value">--</div>
       </div>
       <div class="detail">
         <div class="label">Timestamp</div>
@@ -339,6 +370,14 @@ DASHBOARD_HTML = """
       <div class="detail">
         <div class="label">Review Images</div>
         <div id="review-images" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Snapshot Mode</div>
+        <div id="snapshot-mode" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Runtime Mode</div>
+        <div id="runtime-mode" class="value">--</div>
       </div>
     </section>
 
@@ -417,6 +456,16 @@ DASHBOARD_HTML = """
       return "bad";
     }
 
+    function resultState(result) {
+      if (result === "PASS") {
+        return "ok";
+      }
+      if (result === "NO_PART" || result === "LOW_CONFIDENCE" || result === "SIMULATION") {
+        return "warn";
+      }
+      return "bad";
+    }
+
     function refreshSnapshot() {
       if (!SNAPSHOT_ENABLED) {
         return;
@@ -447,20 +496,22 @@ DASHBOARD_HTML = """
         var latest = await responses[1].json();
 
         var cameraStatus = latest.camera_status || status.camera_status || "Unknown";
-        var stableDetected = Boolean(latest.stable_detected);
         var rawDetected = Boolean(latest.raw_detected);
+        var inspectionResult = latest.inspection_result || "NO_PART";
 
         setText("camera-status", cameraStatus);
         setBoxState("camera-box", cameraState(cameraStatus));
 
-        setText("stable-status", boolText(stableDetected));
-        setBoxState("stable-box", stableDetected ? "ok" : "bad");
+        setText("stable-status", inspectionResult);
+        setBoxState("stable-box", resultState(inspectionResult));
 
         setText("raw-status", "Raw: " + yesNo(rawDetected));
         setBadgeState("raw-status", rawDetected);
 
-        setText("class-name", latest.class_name || "--");
+        setText("class-name", latest.active_class || latest.class_name || "--");
+        setText("model-status", latest.model_status || status.model_status || "--");
         setText("confidence", formatConfidence(latest.confidence));
+        setText("result-message", latest.result_message || "--");
         setText("timestamp", latest.timestamp || "--");
         setText("camera-fps", formatNumber(status.camera_fps, 1, ""));
         setText("inference-fps", formatNumber(status.inference_fps, 1, ""));
@@ -473,6 +524,8 @@ DASHBOARD_HTML = """
           countValue(status.low_confidence_count) + " low / " +
           countValue(status.no_detection_count) + " none"
         );
+        setText("snapshot-mode", status.snapshot_enabled ? "Debug On" : "Off");
+        setText("runtime-mode", status.simulation_mode ? "SIMULATION" : "Production");
         setText("profile-name", status.profile_name || latest.profile_name || "--");
         setText("model-path", status.model_path || latest.model_path || "--");
         setText("browser-updated", new Date().toLocaleTimeString());
@@ -510,6 +563,8 @@ class RuntimeDetectorService:
         profile_name=ACTIVE_MODEL_PROFILE,
         model_path=None,
         camera_index=CAMERA_INDEX,
+        camera_source=None,
+        dry_run=False,
         confidence=None,
         detection_required_frames=3,
         miss_required_frames=3,
@@ -521,9 +576,38 @@ class RuntimeDetectorService:
         enable_snapshot=False,
     ):
         self.profile_name = profile_name
-        self.model_path, self.profile_config, self.classes = self._resolve_model(profile_name, model_path)
+        self.camera_source = str(camera_source) if camera_source else ""
+        self.dry_run = bool(dry_run)
+        self.simulation_mode = self.dry_run or bool(self.camera_source)
+        self.model_status = MODEL_STATUS_LOADED
+        self.model_error = ""
+        if self.dry_run:
+            self.model_path, self.profile_config, self.classes = self._resolve_dry_run_profile(
+                profile_name,
+                model_path,
+            )
+            self.model_status = MODEL_STATUS_SIMULATION
+        else:
+            try:
+                self.model_path, self.profile_config, self.classes = self._resolve_model(
+                    profile_name,
+                    model_path,
+                )
+            except ProfileConfigError:
+                raise
+            except Exception as exc:
+                self.model_path, self.profile_config, self.classes = self._resolve_model_error_profile(
+                    profile_name,
+                    model_path,
+                )
+                self.model_status = MODEL_STATUS_ERROR
+                self.model_error = str(exc)
         self.target_classes = self._load_target_classes()
         self.confidence = self._load_confidence(confidence)
+        self.inspection_rules = self._load_inspection_rules(
+            detection_required_frames=detection_required_frames,
+            miss_required_frames=miss_required_frames,
+        )
         self.imgsz = max(1, int(imgsz))
         self.frame_width = max(1, int(frame_width))
         self.frame_height = max(1, int(frame_height))
@@ -533,16 +617,17 @@ class RuntimeDetectorService:
         self.inference_interval_seconds = max(0.0, self.inference_interval_ms / 1000)
         self.snapshot_interval_seconds = max(0.0, self.snapshot_interval_ms / 1000)
 
-        self.model = YOLO(str(self.model_path))
-        self.camera = CameraManager(
-            camera_index=camera_index,
-            frame_width=self.frame_width,
-            frame_height=self.frame_height,
-        )
+        self.model = None
+        if not self.dry_run and self.model_status != MODEL_STATUS_ERROR:
+            try:
+                self.model = self._load_yolo_model()
+            except Exception as exc:
+                self.model_status = MODEL_STATUS_ERROR
+                self.model_error = str(exc)
+        self.camera = self._create_camera(camera_index, camera_source)
         self.inspection = InspectionLogic(
             target_classes=self.target_classes,
-            detection_required_frames=detection_required_frames,
-            miss_required_frames=miss_required_frames,
+            **self.inspection_rules,
         )
         self.output_manager = OutputManager()
 
@@ -570,6 +655,7 @@ class RuntimeDetectorService:
         self.total_images_saved = 0
         self.low_confidence_count = 0
         self.no_detection_count = 0
+        self.dry_run_inference_count = 0
         self.last_review_image_times = {
             "detections": 0.0,
             "low_confidence": 0.0,
@@ -581,6 +667,8 @@ class RuntimeDetectorService:
             return
 
         self.camera.open()
+        self.output_manager.log_startup(self.profile_name, self._startup_details())
+        self._log_startup_faults()
         self.running = True
         self.started_at = datetime.now().isoformat(timespec="seconds")
         self.camera_thread = threading.Thread(target=self._camera_loop, daemon=True)
@@ -595,17 +683,76 @@ class RuntimeDetectorService:
                 thread.join(timeout=2.0)
         self.camera.release()
 
+    def _create_camera(self, camera_index, camera_source):
+        if camera_source:
+            return SimulatedCameraSource(camera_source)
+
+        return CameraManager(
+            camera_index=camera_index,
+            frame_width=self.frame_width,
+            frame_height=self.frame_height,
+        )
+
+    def _load_yolo_model(self):
+        if YOLO is None:
+            raise RuntimeError(f"Ultralytics YOLO is not available: {YOLO_IMPORT_ERROR}")
+
+        return YOLO(str(self.model_path))
+
+    def _startup_details(self):
+        return {
+            "profile": self.profile_name,
+            "model_path": str(self.model_path),
+            "model_status": self.model_status,
+            "camera_source": self.camera_source,
+            "dry_run": self.dry_run,
+            "simulation_mode": self.simulation_mode,
+            "frame_width": self.frame_width,
+            "frame_height": self.frame_height,
+            "imgsz": self.imgsz,
+            "inference_interval_ms": self.inference_interval_ms,
+            "snapshot_enabled": self.enable_snapshot,
+            "inspection_rules": self.inspection_rules,
+        }
+
+    def _log_startup_faults(self):
+        if self.model_status == MODEL_STATUS_ERROR:
+            self.output_manager.log_fault(
+                self.profile_name,
+                "model_error",
+                self.model_error or "Runtime model is not available.",
+                self._startup_details(),
+                cooldown_seconds=0,
+            )
+
+        if self.camera.status != "Connected":
+            self.output_manager.log_fault(
+                self.profile_name,
+                "camera_error",
+                getattr(self.camera, "last_error", "") or f"Camera status is {self.camera.status}.",
+                {"camera_status": self.camera.status, "camera_source": self.camera_source},
+                cooldown_seconds=0,
+            )
+
     def get_status(self):
         with self.lock:
+            latest = dict(self.latest_detection)
             return {
                 "running": self.running,
                 "started_at": self.started_at,
                 "profile_name": self.profile_name,
                 "model_path": str(self.model_path),
+                "model_status": self.model_status,
+                "model_error": self.model_error,
+                "camera_source": self.camera_source,
+                "dry_run": self.dry_run,
+                "simulation_mode": self.simulation_mode,
                 "classes": self.classes,
                 "target_classes": sorted(self.target_classes),
+                "inspection_rules": self.inspection_rules,
                 "confidence": self.confidence,
                 "camera_status": self.camera.status,
+                "camera_last_error": getattr(self.camera, "last_error", ""),
                 "frame_count": self.frame_count,
                 "camera_frame_count": self.camera_frame_count,
                 "camera_fps": self.camera_fps,
@@ -619,12 +766,20 @@ class RuntimeDetectorService:
                 "snapshot_interval_ms": self.snapshot_interval_ms,
                 "snapshot_enabled": self.enable_snapshot,
                 "latest_snapshot_at": self.latest_snapshot_at,
+                "review_image_interval_seconds": DEFAULT_REVIEW_IMAGE_INTERVAL_SECONDS,
                 "total_detections": self.total_detections,
                 "total_images_saved": self.total_images_saved,
                 "low_confidence_count": self.low_confidence_count,
                 "no_detection_count": self.no_detection_count,
+                "logging_last_error": self.output_manager.last_error,
                 "last_error": self.last_error,
-                "latest_detection": self.latest_detection,
+                "inspection_result": latest.get("inspection_result"),
+                "pass_fail_bool": latest.get("pass_fail_bool"),
+                "result_message": latest.get("result_message"),
+                "class_name": latest.get("class_name"),
+                "active_class": latest.get("active_class") or latest.get("class_name"),
+                "latest_detection": latest,
+                "output_payload": getattr(self.output_manager, "last_payload", {}),
             }
 
     def get_latest_detection(self):
@@ -659,13 +814,31 @@ class RuntimeDetectorService:
             if frame is None:
                 if self._inference_due():
                     self._mark_inference_started()
-                    detection = self.inspection.update([], (1, 1, 3))
-                    self._update_latest(detection)
-                    self.output_manager.handle_detection(
+                    detection = self.inspection.update(
+                        [],
+                        (1, 1, 3),
+                        camera_status=self.camera.status,
+                        model_status=self.model_status,
+                        simulation_mode=self.simulation_mode,
+                    )
+                    output_payload = self.output_manager.handle_detection(
                         active_profile=self.profile_name,
                         detection=detection,
                         camera_status=self.camera.status,
+                        model_status=self.model_status,
+                        simulation_mode=self.simulation_mode,
                     )
+                    self._update_latest(detection, output_payload)
+                    if detection.get("inspection_result") == "CAMERA_ERROR":
+                        self.output_manager.log_fault(
+                            self.profile_name,
+                            "camera_error",
+                            detection.get("result_message", "Camera frame unavailable."),
+                            {
+                                "camera_status": self.camera.status,
+                                "camera_last_error": getattr(self.camera, "last_error", ""),
+                            },
+                        )
                 time.sleep(0.02)
                 continue
 
@@ -676,28 +849,53 @@ class RuntimeDetectorService:
             try:
                 self._mark_inference_started()
                 inference_started = time.perf_counter()
-                results = self.model.predict(
-                    frame,
-                    conf=self.confidence,
-                    imgsz=self.imgsz,
-                    verbose=False,
-                )
+                if self.dry_run:
+                    detections = self._fake_detections(frame)
+                elif self.model_status == MODEL_STATUS_ERROR or self.model is None:
+                    detections = []
+                    self.output_manager.log_fault(
+                        self.profile_name,
+                        "model_error",
+                        self.model_error or "Runtime model is not available.",
+                        {"model_path": str(self.model_path), "model_status": self.model_status},
+                    )
+                else:
+                    results = self.model.predict(
+                        frame,
+                        conf=self.confidence,
+                        imgsz=self.imgsz,
+                        verbose=False,
+                    )
+                    detections = self._extract_detections(results)
                 inference_ms = (time.perf_counter() - inference_started) * 1000
-                detections = self._extract_detections(results)
-                detection = self.inspection.update(detections, frame.shape)
+                detection = self.inspection.update(
+                    detections,
+                    frame.shape,
+                    camera_status=self.camera.status,
+                    model_status=self.model_status,
+                    simulation_mode=self.simulation_mode,
+                )
                 detection = self._handle_review_images(frame, detection)
                 self._maybe_update_snapshot(frame, detections, detection)
                 self._update_runtime_timing(inference_ms)
                 self.last_error = ""
-                self._update_latest(detection)
-                self.output_manager.handle_detection(
+                output_payload = self.output_manager.handle_detection(
                     active_profile=self.profile_name,
                     detection=detection,
                     camera_status=self.camera.status,
+                    model_status=self.model_status,
+                    simulation_mode=self.simulation_mode,
                 )
+                self._update_latest(detection, output_payload)
             except Exception as exc:
                 self.last_error = str(exc)
                 self._update_latest(self.inspection.snapshot())
+                self.output_manager.log_fault(
+                    self.profile_name,
+                    "runtime_exception",
+                    str(exc),
+                    {"model_status": self.model_status, "camera_status": self.camera.status},
+                )
                 time.sleep(0.1)
 
     def _get_latest_camera_frame(self):
@@ -714,15 +912,27 @@ class RuntimeDetectorService:
     def _mark_inference_started(self):
         self.last_inference_run_time = time.monotonic()
 
-    def _update_latest(self, detection):
+    def _update_latest(self, detection, output_payload=None):
         latest = {
             **detection,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "profile_name": self.profile_name,
             "model_path": str(self.model_path),
+            "model_status": self.model_status,
+            "model_error": self.model_error,
+            "camera_source": self.camera_source,
+            "dry_run": self.dry_run,
+            "simulation_mode": self.simulation_mode,
             "camera_status": self.camera.status,
             "saved_image_path": detection.get("saved_image_path", ""),
         }
+        latest["output_payload"] = output_payload or OutputManager.build_output_payload(
+            active_profile=self.profile_name,
+            detection=latest,
+            camera_status=self.camera.status,
+            model_status=self.model_status,
+            simulation_mode=self.simulation_mode,
+        )
 
         with self.lock:
             self.latest_detection = latest
@@ -788,7 +998,10 @@ class RuntimeDetectorService:
                 )
             )
 
-        if not detection.get("raw_detected"):
+        if (
+            not detection.get("raw_detected")
+            and detection.get("inspection_result", "NO_PART") == "NO_PART"
+        ):
             saved_paths.append(self._save_review_image(frame, "no_detection"))
 
         saved_paths = [str(path) for path in saved_paths if path]
@@ -902,11 +1115,48 @@ class RuntimeDetectorService:
                 "timestamp": None,
                 "profile_name": self.profile_name,
                 "model_path": str(self.model_path),
+                "model_status": self.model_status,
+                "model_error": self.model_error,
+                "camera_source": self.camera_source,
+                "dry_run": self.dry_run,
+                "simulation_mode": self.simulation_mode,
                 "camera_status": self.camera.status,
                 "saved_image_path": "",
             }
         )
+        detection["output_payload"] = self.output_manager.build_output_payload(
+            active_profile=self.profile_name,
+            detection=detection,
+            camera_status=self.camera.status,
+            model_status=self.model_status,
+            simulation_mode=self.simulation_mode,
+        )
         return detection
+
+    def _fake_detections(self, frame):
+        self.dry_run_inference_count += 1
+        if self.dry_run_inference_count % 10 == 0:
+            return []
+
+        height, width = frame.shape[:2]
+        box_width = max(8, int(width * 0.35))
+        box_height = max(8, int(height * 0.35))
+        center_x = width // 2
+        center_y = height // 2
+        x1 = max(0, center_x - box_width // 2)
+        y1 = max(0, center_y - box_height // 2)
+        x2 = min(width - 1, center_x + box_width // 2)
+        y2 = min(height - 1, center_y + box_height // 2)
+        class_name = sorted(self.target_classes)[0] if self.target_classes else "simulated_object"
+
+        return [
+            {
+                "class_id": self.classes.index(class_name) if class_name in self.classes else 0,
+                "class_name": class_name,
+                "confidence": 0.55,
+                "bbox": [x1, y1, x2, y2],
+            }
+        ]
 
     def _extract_detections(self, results):
         detections = []
@@ -951,7 +1201,9 @@ class RuntimeDetectorService:
             cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
             self._draw_label(output, label, x1, y1, color)
 
-        status = "Detected" if detection.get("stable_detected") else "Not Detected"
+        status = detection.get("inspection_result") or (
+            "Detected" if detection.get("stable_detected") else "Not Detected"
+        )
         raw = "Raw: Yes" if detection.get("raw_detected") else "Raw: No"
         cv2.putText(output, status, (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
         cv2.putText(output, raw, (12, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -1002,8 +1254,117 @@ class RuntimeDetectorService:
         except (TypeError, ValueError):
             return DEFAULT_CONFIDENCE
 
+    def _load_inspection_rules(self, detection_required_frames, miss_required_frames):
+        inspection_config = (
+            self.profile_config.get("inspection")
+            or self.profile_config.get("inspection_rules")
+            or {}
+        )
+        if not isinstance(inspection_config, dict):
+            raise ProfileConfigError(
+                f"Invalid inspection config for profile '{self.profile_name}': inspection must be an object."
+            )
+
+        roi_config = inspection_config.get("roi") or {}
+        if not isinstance(roi_config, dict):
+            raise ProfileConfigError(
+                f"Invalid inspection config for profile '{self.profile_name}': roi must be an object."
+            )
+
+        acceptable_classes = (
+            inspection_config.get("acceptable_classes")
+            or inspection_config.get("pass_classes")
+            or self.profile_config.get("acceptable_classes")
+            or self.target_classes
+            or self.classes
+        )
+        reject_classes = (
+            inspection_config.get("reject_classes")
+            or inspection_config.get("fail_classes")
+            or self.profile_config.get("reject_classes")
+            or []
+        )
+        minimum_confidence = (
+            inspection_config.get("minimum_confidence")
+            or inspection_config.get("min_confidence")
+            or self.confidence
+        )
+        required_frames = (
+            inspection_config.get("required_consecutive_detections")
+            or inspection_config.get("detection_required_frames")
+            or detection_required_frames
+        )
+        allowed_no_detection = (
+            inspection_config.get("allowed_no_detection_frames")
+            or inspection_config.get("miss_required_frames")
+            or miss_required_frames
+        )
+
+        try:
+            return {
+                "acceptable_classes": self._as_list(acceptable_classes),
+                "reject_classes": self._as_list(reject_classes),
+                "minimum_confidence": self._as_float(minimum_confidence, "minimum_confidence"),
+                "detection_required_frames": self._as_positive_int(
+                    required_frames,
+                    "required_consecutive_detections",
+                ),
+                "miss_required_frames": self._as_positive_int(
+                    allowed_no_detection,
+                    "allowed_no_detection_frames",
+                ),
+                "roi_enabled": self._as_bool(
+                    roi_config.get("enabled", roi_config.get("roi_enabled", ROI_ENABLED))
+                ),
+                "roi_x1": self._as_float(roi_config.get("x1", roi_config.get("roi_x1", ROI_X1)), "roi.x1"),
+                "roi_y1": self._as_float(roi_config.get("y1", roi_config.get("roi_y1", ROI_Y1)), "roi.y1"),
+                "roi_x2": self._as_float(roi_config.get("x2", roi_config.get("roi_x2", ROI_X2)), "roi.x2"),
+                "roi_y2": self._as_float(roi_config.get("y2", roi_config.get("roi_y2", ROI_Y2)), "roi.y2"),
+                "allow_simulation": self._as_bool(inspection_config.get("allow_simulation", True)),
+            }
+        except (TypeError, ValueError) as exc:
+            raise ProfileConfigError(
+                f"Invalid inspection config for profile '{self.profile_name}': {exc}"
+            ) from exc
+
+    @staticmethod
+    def _as_list(value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return list(value)
+
+    @staticmethod
+    def _as_bool(value):
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @staticmethod
+    def _as_float(value, name):
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be numeric") from exc
+
+    @staticmethod
+    def _as_positive_int(value, name):
+        try:
+            number = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be an integer") from exc
+
+        if number < 1:
+            raise ValueError(f"{name} must be 1 or greater")
+        return number
+
     def _resolve_model(self, profile_name, model_path):
         profile_dir = MODELS_DIR / profile_name
+
+        if not profile_dir.exists():
+            raise FileNotFoundError(f"Model profile not found: {profile_dir}")
+
         config = self._load_profile_config(profile_dir)
         classes = self._load_classes(profile_dir)
 
@@ -1021,18 +1382,93 @@ class RuntimeDetectorService:
                     path = profile_dir / "best.pt"
 
         if not path.exists():
-            raise FileNotFoundError(f"Runtime model not found: {path}")
+            raise FileNotFoundError(
+                f"Runtime model not found for profile '{profile_name}': {path}"
+            )
+
+        return path, config, classes
+
+    def _resolve_model_error_profile(self, profile_name, model_path):
+        profile_dir = MODELS_DIR / profile_name
+        config = self._load_profile_config(profile_dir) if profile_dir.exists() else {}
+        classes = self._load_classes(profile_dir) if profile_dir.exists() else []
+
+        if model_path:
+            path = Path(model_path)
+            if not path.is_absolute():
+                path = PROJECT_ROOT / path
+        else:
+            path = profile_dir / "MODEL_ERROR"
+
+        return path, config, classes
+
+    def _resolve_dry_run_profile(self, profile_name, model_path):
+        profile_dir = MODELS_DIR / profile_name
+        config = {}
+        classes = []
+
+        if profile_dir.exists():
+            config = self._load_profile_config(profile_dir)
+            classes = self._load_classes(profile_dir)
+
+        if not classes:
+            classes = ["simulated_object"]
+
+        if not config.get("target_classes"):
+            config["target_classes"] = [classes[0]]
+        config.setdefault("confidence", 0.5)
+
+        if model_path:
+            path = Path(model_path)
+            if not path.is_absolute():
+                path = PROJECT_ROOT / path
+        else:
+            configured_model = config.get("model_file")
+            if configured_model and profile_dir.exists():
+                path = profile_dir / configured_model
+            else:
+                path = profile_dir / "latest" / "best.pt"
+                if profile_dir.exists() and not path.exists():
+                    path = profile_dir / "best.pt"
+
+        if not path.exists():
+            path = profile_dir / "DRY_RUN_NO_MODEL"
 
         return path, config, classes
 
     @staticmethod
     def _load_profile_config(profile_dir):
+        config = {}
         config_path = profile_dir / "config.json"
-        if not config_path.exists():
-            return {}
+        if config_path.exists():
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            except json.JSONDecodeError as exc:
+                raise ProfileConfigError(f"Invalid profile config JSON: {config_path}: {exc}") from exc
 
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        yaml_path = PROFILE_CONFIGS_DIR / profile_dir.name / "config.yaml"
+        if yaml_path.exists():
+            try:
+                yaml_config = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError as exc:
+                raise ProfileConfigError(f"Invalid runtime profile YAML: {yaml_path}: {exc}") from exc
+
+            if not isinstance(yaml_config, dict):
+                raise ProfileConfigError(f"Runtime profile YAML must be an object: {yaml_path}")
+            config = RuntimeDetectorService._deep_merge(config, yaml_config)
+
+        return config
+
+    @staticmethod
+    def _deep_merge(base, override):
+        merged = dict(base)
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = RuntimeDetectorService._deep_merge(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
 
     @staticmethod
     def _load_classes(profile_dir):
@@ -1098,6 +1534,17 @@ def main():
     parser.add_argument("--profile", default=os.getenv("VISION_MODEL_PROFILE", ACTIVE_MODEL_PROFILE))
     parser.add_argument("--model", default=os.getenv("VISION_MODEL_PATH"))
     parser.add_argument("--camera", type=int, default=int(os.getenv("VISION_CAMERA_INDEX", CAMERA_INDEX)))
+    parser.add_argument(
+        "--camera-source",
+        default=os.getenv("VISION_CAMERA_SOURCE"),
+        help="Use an image, image folder, or video file instead of a physical camera.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=os.getenv("VISION_DRY_RUN", "").lower() in {"1", "true", "yes", "on"},
+        help="Run without a YOLO model using simulated detections for dashboard/runtime testing.",
+    )
     parser.add_argument("--host", default=os.getenv("VISION_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("VISION_PORT", "8000")))
     parser.add_argument("--confidence", type=float, default=None)
@@ -1131,20 +1578,27 @@ def main():
     )
     args = parser.parse_args()
 
-    service = RuntimeDetectorService(
-        profile_name=args.profile,
-        model_path=args.model,
-        camera_index=args.camera,
-        confidence=args.confidence,
-        detection_required_frames=args.detection_required_frames,
-        miss_required_frames=args.miss_required_frames,
-        imgsz=args.imgsz,
-        frame_width=args.frame_width,
-        frame_height=args.frame_height,
-        inference_interval_ms=args.inference_interval_ms,
-        snapshot_interval_ms=args.snapshot_interval_ms,
-        enable_snapshot=args.enable_snapshot,
-    )
+    try:
+        service = RuntimeDetectorService(
+            profile_name=args.profile,
+            model_path=args.model,
+            camera_index=args.camera,
+            camera_source=args.camera_source,
+            dry_run=args.dry_run,
+            confidence=args.confidence,
+            detection_required_frames=args.detection_required_frames,
+            miss_required_frames=args.miss_required_frames,
+            imgsz=args.imgsz,
+            frame_width=args.frame_width,
+            frame_height=args.frame_height,
+            inference_interval_ms=args.inference_interval_ms,
+            snapshot_interval_ms=args.snapshot_interval_ms,
+            enable_snapshot=args.enable_snapshot,
+        )
+    except Exception as exc:
+        print(f"Runtime failed to initialize: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
     service.start()
 
     try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 
@@ -16,7 +17,11 @@ def _pairs_ok(images_dir: Path, labels_dir: Path) -> tuple[int, int]:
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parent / "datasets" / "my_items"
+    parser = argparse.ArgumentParser(description="Verify image/label pairs for a YOLO dataset.")
+    parser.add_argument("dataset", help="Dataset/profile name under data/datasets.")
+    args = parser.parse_args()
+
+    root = Path(__file__).resolve().parent.parent / "data" / "datasets" / args.dataset
     splits = [("train", root / "images" / "train", root / "labels" / "train"),
               ("val", root / "images" / "val", root / "labels" / "val")]
 
@@ -39,7 +44,7 @@ def main() -> None:
         print(f"[{name}] images={n_images} missing_labels={n_missing}")
 
     if total_images == 0:
-        print("No images found yet. Put your .jpg/.png into datasets/my_items/images/train and images/val.")
+        print(f"No images found yet. Put images into {root}/images/train and {root}/images/val.")
         raise SystemExit(2)
 
     if total_missing:

@@ -9,19 +9,19 @@ model_name: mouse
 model_path: /home/ansible/vision-system/models/{{ model_name }}/best.pt
 
 # Camera Settings
-camera_dvice: /dev/video0
+camera_device: /dev/video0
 pi_camera_enabled: true
 
 # Docker Settings
 docker_registry: docker.io
 image_name: vision-system
-image-tag: latest
+image_tag: latest
 
-# Inferewnce Settings
+# Inference Settings
 inference_confidence_threshold: 0.35
 inference_batch_size: 1
 
-# Loggin
+# Logging
 log_level: INFO
 log_dir: /var/log/vision-system
 
@@ -29,7 +29,7 @@ log_dir: /var/log/vision-system
 docker_memory_limit: 900M
 docker_cpu_quota: 80%
 
-# Netowrk (optional: for remote logging)
+# Network (optional: for remote logging)
 mqtt_broker_host: ""
 mqtt_broker_port: 1883
-mqtt_anabled: false
+mqtt_enabled: false
