@@ -1,3 +1,16 @@
+python -m app.runtime.detector_service \
+ --profile yellow_daifuku \
+ --camera-source samples/test.jpg \
+ --dry-run \
+ --host 127.0.0.1 \
+ --port 8000
+
+python -m app.runtime.detector_service \
+ --profile yellow_daifuku \
+ --camera 0 \
+ --host 127.0.0.1 \
+ --port 8000
+
 # Industrial AI Vision System Prototype
 
 This repository is a prototype industrial vision system for detecting objects or defects with a mounted camera. It has two main modes:
