@@ -11,6 +11,18 @@ python -m app.runtime.detector_service \
  --host 127.0.0.1 \
  --port 8000
 
+#raspberry pi
+
+source .venv/bin/activate
+
+pip install -r requirements.txt
+
+python -m app.main --profile yellow_daifuku --camera 0 --host 0.0.0.0 --port 8000
+
+python -m app.runtime.detector_service --profile yellow_daifuku --camera 0 --host 0.0.0.0 --port 8000
+
+python -m app.runtime.detector_service  --profile yellow_daifuku  --camera 0  --host 127.0.0.1  --port 8000
+
 # Industrial AI Vision System Prototype
 
 This repository is a prototype industrial vision system for detecting objects or defects with a mounted camera. It has two main modes:
