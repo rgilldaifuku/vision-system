@@ -13,6 +13,11 @@ python -m app.runtime.detector_service \
 
 #raspberry pi
 
+ssh ansible@172.28.91.77
+ssh ansible@100000008fadccdd
+ssh pi@172.28.91.77
+
+#
 source .venv/bin/activate
 
 pip install -r requirements.txt
@@ -20,6 +25,7 @@ pip install -r requirements.txt
 python -m app.main --profile yellow_daifuku --camera 0 --host 0.0.0.0 --port 8000
 
 python -m app.runtime.detector_service --profile yellow_daifuku --camera 0 --host 0.0.0.0 --port 8000
+#
 
 python -m app.runtime.detector_service  --profile yellow_daifuku  --camera 0  --host 127.0.0.1  --port 8000
 
