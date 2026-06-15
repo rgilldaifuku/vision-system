@@ -54,14 +54,16 @@ python -m app.runtime.health_check \
   --camera-source assets/test.jpg
 ```
 
-Later on Raspberry Pi with USB camera:
+Later on Raspberry Pi 5 with Pi Camera Module 3:
 
 ```bash
 python -m app.runtime.health_check \
   --mode pi \
   --profile yellow_daifuku \
-  --camera 0
+  --camera-backend picamera2
 ```
+
+For a USB/OpenCV camera on the Pi, use `--camera-backend opencv --camera 0`.
 
 ## API Checks
 
@@ -77,7 +79,7 @@ curl -I http://127.0.0.1:8000/snapshot.jpg
 
 1. Copy the repo and model profile to the Pi.
 2. Run `deploy/install_pi.sh`.
-3. Run `python -m app.runtime.health_check --mode pi --profile yellow_daifuku --camera 0`.
+3. Run `python -m app.runtime.health_check --mode pi --profile yellow_daifuku --camera-backend picamera2`.
 4. Run `deploy/start_service.sh`.
 5. Open `http://<pi-ip>:8000` from the HMI/browser.
 

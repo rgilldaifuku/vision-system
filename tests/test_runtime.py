@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -14,9 +15,11 @@ import numpy as np
 
 import app.runtime.detector_service as detector_service
 import app.runtime.health_check as health_check
+from app.runtime.action_manager import ActionManager
 from app.runtime.camera_sources import SimulatedCameraSource
 from app.runtime.inspection_logic import InspectionLogic
 from app.runtime.output_manager import OutputManager
+from app.runtime.picamera2_manager import Picamera2CameraManager
 
 
 class DummyOutputManager:
@@ -280,6 +283,29 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("Runtime model not found", service.model_error)
                 self.assertEqual(detection["inspection_result"], "MODEL_ERROR")
 
+    def test_auto_backend_preserves_explicit_opencv_camera(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            create_profile(Path(tmpdir))
+
+            with (
+                mock.patch.object(detector_service, "MODELS_DIR", Path(tmpdir)),
+                mock.patch.object(detector_service, "YOLO", lambda path: object()),
+                mock.patch.object(detector_service.Picamera2CameraManager, "is_available", return_value=True),
+            ):
+                explicit_camera = detector_service.RuntimeDetectorService(
+                    profile_name="test_profile",
+                    camera_index=0,
+                    camera_backend="auto",
+                )
+                auto_camera = detector_service.RuntimeDetectorService(
+                    profile_name="test_profile",
+                    camera_index=None,
+                    camera_backend="auto",
+                )
+
+            self.assertEqual(explicit_camera.camera.backend, "opencv")
+            self.assertEqual(auto_camera.camera.backend, "picamera2")
+
     def test_invalid_profile_config_raises_readable_error(self):
         with tempfile.TemporaryDirectory() as models_tmp, tempfile.TemporaryDirectory() as profiles_tmp:
             create_profile(Path(models_tmp))
@@ -374,7 +400,10 @@ class RuntimeTests(unittest.TestCase):
             "model_path",
             "model_status",
             "camera_source",
+            "camera_backend",
+            "camera_connected",
             "dry_run",
+            "runtime_mode",
             "simulation_mode",
             "inspection_rules",
             "camera_fps",
@@ -392,15 +421,78 @@ class RuntimeTests(unittest.TestCase):
         ):
             self.assertIn(key, status)
         self.assertIn("inspection_result", status["latest_detection"])
+        self.assertIn("runtime", status)
+        self.assertIn("camera", status)
+        self.assertIn("model", status)
+        self.assertIn("inspection", status)
+        self.assertIn("performance", status)
+        self.assertIn("counters", status)
+        self.assertIn("output_payload", status)
 
     def test_health_check_mode_parsing(self):
         parser = health_check.create_parser()
         laptop_args = parser.parse_args(["--mode", "laptop", "--profile", "yellow_daifuku"])
-        pi_args = parser.parse_args(["--mode", "pi", "--profile", "yellow_daifuku", "--camera", "0"])
+        pi_args = parser.parse_args([
+            "--mode",
+            "pi",
+            "--profile",
+            "yellow_daifuku",
+            "--camera-backend",
+            "picamera2",
+        ])
 
         self.assertEqual(laptop_args.mode, "laptop")
         self.assertEqual(pi_args.mode, "pi")
-        self.assertEqual(pi_args.camera, 0)
+        self.assertEqual(pi_args.camera_backend, "picamera2")
+
+    def test_picamera2_manager_missing_package_is_safe(self):
+        with mock.patch.object(
+            Picamera2CameraManager,
+            "_import_picamera2",
+            side_effect=RuntimeError("Picamera2 is not available"),
+        ):
+            camera = Picamera2CameraManager(frame_width=64, frame_height=48, warmup_seconds=0)
+            self.assertFalse(camera.open())
+            self.assertEqual(camera.backend, "picamera2")
+            self.assertEqual(camera.status, "Failed")
+            self.assertIn("Picamera2", camera.last_error)
+
+    def test_action_manager_writes_latest_status_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status_path = Path(tmpdir) / "latest_status.json"
+            manager = ActionManager(
+                action_config={"actions_by_result": {"PASS": ["write_latest_status_json", "increment_counter"]}},
+                status_path=status_path,
+                event_cooldown_seconds=0,
+            )
+            result = manager.handle(
+                {
+                    "timestamp": "2026-06-15T12:00:00",
+                    "profile": "test_profile",
+                    "runtime_mode": "PRODUCTION",
+                    "simulation_mode": False,
+                    "camera_backend": "opencv",
+                    "camera_connected": True,
+                    "model_loaded": True,
+                    "inspection_result": "PASS",
+                    "pass_fail_bool": True,
+                    "active_class": "part",
+                    "confidence": 0.9,
+                    "message": "Accepted.",
+                    "saved_image_path": None,
+                    "counters": {},
+                    "inference_ms": 25.0,
+                    "inference_fps": 4.0,
+                    "camera_fps": 20.0,
+                }
+            )
+
+            self.assertTrue(status_path.exists())
+            payload = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["inspection_result"], "PASS")
+            self.assertEqual(payload["camera_backend"], "opencv")
+            self.assertEqual(payload["counters"]["pass"], 1)
+            self.assertEqual(result["placeholder_outputs"]["gpio"], "disabled")
 
     def test_health_check_reports_invalid_runtime_rules(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -569,6 +661,7 @@ class RuntimeTests(unittest.TestCase):
         for argument in (
             "--profile",
             "--camera",
+            "--camera-backend",
             "--host",
             "--port",
             "--imgsz",
@@ -584,7 +677,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("python -m app.runtime.health_check", readme)
         self.assertIn("scripts/setup_local.sh", readme)
         self.assertIn("scripts/run_demo.sh", readme)
-        for argument in ("--mode", "--profile", "--camera-source"):
+        for argument in ("--mode", "--profile", "--camera-source", "--camera-backend"):
             self.assertIn(argument, health_help_result.stdout)
 
 

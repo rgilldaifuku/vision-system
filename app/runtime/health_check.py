@@ -13,6 +13,9 @@ DEFAULT_FRAME_WIDTH = 640
 DEFAULT_FRAME_HEIGHT = 480
 DEFAULT_INFERENCE_INTERVAL_MS = 200
 DEFAULT_SNAPSHOT_INTERVAL_MS = 1000
+CAMERA_BACKEND_AUTO = "auto"
+CAMERA_BACKEND_PICAMERA2 = "picamera2"
+CAMERA_BACKEND_OPENCV = "opencv"
 
 
 REQUIRED_IMPORTS = {
@@ -25,6 +28,16 @@ REQUIRED_IMPORTS = {
     "ultralytics": "ultralytics",
     "yaml": "PyYAML",
 }
+RUNTIME_MODULES = (
+    "app.runtime.detector_service",
+    "app.runtime.camera_manager",
+    "app.runtime.camera_sources",
+    "app.runtime.health_check",
+    "app.runtime.inspection_logic",
+    "app.runtime.output_manager",
+    "app.runtime.action_manager",
+    "app.runtime.picamera2_manager",
+)
 
 
 class HealthCheck:
@@ -56,6 +69,12 @@ def create_parser():
     parser.add_argument("--model")
     parser.add_argument("--camera", type=int)
     parser.add_argument("--camera-source")
+    parser.add_argument(
+        "--camera-backend",
+        choices=(CAMERA_BACKEND_AUTO, CAMERA_BACKEND_PICAMERA2, CAMERA_BACKEND_OPENCV),
+        default=CAMERA_BACKEND_AUTO,
+        help="Camera backend to validate when a physical camera is used.",
+    )
     parser.add_argument("--imgsz", type=int, default=DEFAULT_IMGSZ)
     parser.add_argument("--frame-width", type=int, default=DEFAULT_FRAME_WIDTH)
     parser.add_argument("--frame-height", type=int, default=DEFAULT_FRAME_HEIGHT)
@@ -70,9 +89,11 @@ def main():
 
     check = HealthCheck()
     print(f"Health check mode: {args.mode}")
+    print(f"Camera backend: {args.camera_backend}")
 
     check_python(check)
     check_imports(check)
+    check_runtime_imports(check)
     check_runtime_config(check, args)
     check_profile_and_model(check, args)
     check_write_permissions(check)
@@ -102,6 +123,16 @@ def check_imports(check):
             check.fail(f"Cannot import {module_name} ({package_name}): {exc}")
         else:
             check.ok(f"Imported {module_name} ({package_name})")
+
+
+def check_runtime_imports(check):
+    for module_name in RUNTIME_MODULES:
+        try:
+            importlib.import_module(module_name)
+        except Exception as exc:
+            check.fail(f"Cannot import runtime module {module_name}: {exc}")
+        else:
+            check.ok(f"Imported runtime module {module_name}")
 
 
 def check_runtime_config(check, args):
@@ -238,10 +269,6 @@ def check_write_permissions(check):
 
 
 def check_camera(check, args):
-    if args.mode == "pi" and args.camera is None:
-        check.fail("Pi hardware mode requires --camera 0 or another camera index")
-        return
-
     if args.mode == "laptop" and not args.camera_source and args.camera is not None:
         check.warn("Laptop mode is usually tested with --camera-source; checking physical camera")
 
@@ -251,15 +278,37 @@ def check_camera(check, args):
         check_simulated_camera_source(check, args.camera_source)
         return
 
-    if args.camera is None:
-        check.warn("No camera check requested; pass --camera-source <path> for laptop or --camera 0 for Pi")
+    if args.camera_backend == CAMERA_BACKEND_PICAMERA2:
+        check_picamera2_camera(check, args, required=True)
         return
 
+    if args.camera_backend == CAMERA_BACKEND_AUTO and args.mode == "pi":
+        if check_picamera2_camera(check, args, required=False):
+            return
+
+        if args.camera is not None:
+            check.warn("Picamera2 check failed; also checking OpenCV fallback camera")
+            check_opencv_camera(check, args)
+        else:
+            check.fail("No usable camera backend found. Install Picamera2 or provide --camera for OpenCV fallback.")
+        return
+
+    if args.camera is None:
+        check.warn(
+            "No camera check requested; pass --camera-source <path>, "
+            "--camera-backend picamera2, or --camera 0"
+        )
+        return
+
+    check_opencv_camera(check, args)
+
+
+def check_opencv_camera(check, args):
     try:
         cv2 = importlib.import_module("cv2")
     except Exception as exc:
         check.fail(f"Cannot check camera because OpenCV import failed: {exc}")
-        return
+        return False
 
     capture = cv2.VideoCapture(args.camera)
     try:
@@ -267,15 +316,62 @@ def check_camera(check, args):
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(args.frame_height))
         if not capture.isOpened():
             check.fail(f"Camera {args.camera} did not open")
-            return
+            return False
 
         ok, frame = capture.read()
         if ok and frame is not None:
             check.ok(f"Camera {args.camera} opened and returned a frame")
+            return True
         else:
             check.fail(f"Camera {args.camera} opened but did not return a frame")
+            return False
     finally:
         capture.release()
+
+
+def check_picamera2_camera(check, args, required=True):
+    try:
+        from app.runtime.picamera2_manager import Picamera2CameraManager
+    except Exception as exc:
+        _camera_check_issue(check, f"Cannot import Picamera2 camera manager: {exc}", required)
+        return False
+
+    try:
+        Picamera2CameraManager._import_picamera2()
+    except Exception as exc:
+        _camera_check_issue(check, str(exc), required)
+        return False
+
+    camera = Picamera2CameraManager(
+        frame_width=args.frame_width,
+        frame_height=args.frame_height,
+        warmup_seconds=0.2,
+    )
+    try:
+        if not camera.open():
+            _camera_check_issue(check, camera.last_error or "Picamera2 camera did not open", required)
+            return False
+
+        frame = camera.read_frame()
+        if frame is None:
+            _camera_check_issue(
+                check,
+                camera.last_error or "Picamera2 opened but did not return a frame",
+                required,
+            )
+            return False
+
+        check.ok(f"Picamera2 returned frame {frame.shape[1]}x{frame.shape[0]}")
+        return True
+    finally:
+        camera.release()
+
+
+def _camera_check_issue(check, message, required):
+    if required:
+        check.fail(message)
+    else:
+        check.warn(message)
 
 
 def check_simulated_camera_source(check, source_path):

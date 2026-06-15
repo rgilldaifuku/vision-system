@@ -27,6 +27,11 @@ class SimulatedCameraSource:
         self.image_frame = None
         self.capture = None
         self.last_frame_time = 0.0
+        self.backend = "simulated"
+
+    @property
+    def connected(self):
+        return self.status == self.CONNECTED
 
     def open(self):
         self.release()
@@ -89,13 +94,13 @@ class SimulatedCameraSource:
         self._pace_frames()
 
         if self.mode == "image":
-            return self.image_frame.copy()
+            return self._mark_frame(self.image_frame.copy())
 
         if self.mode == "folder":
-            return self._read_next_folder_image()
+            return self._mark_frame(self._read_next_folder_image())
 
         if self.mode == "video":
-            return self._read_next_video_frame()
+            return self._mark_frame(self._read_next_video_frame())
 
         self.last_error = "Simulated camera source is not open"
         self.status = self.FAILED
@@ -147,6 +152,11 @@ class SimulatedCameraSource:
             time.sleep(self.frame_interval_seconds - elapsed)
 
         self.last_frame_time = time.monotonic()
+
+    def _mark_frame(self, frame):
+        if frame is not None:
+            self.last_frame_time = time.monotonic()
+        return frame
 
     @staticmethod
     def _collect_images(folder):

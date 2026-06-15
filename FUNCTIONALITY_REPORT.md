@@ -175,11 +175,11 @@ This report describes the prototype as it exists now. It is intentionally practi
 - `deploy/start_service.sh` enables and restarts the service.
 - Dockerfile and docker-compose are present for runtime-oriented container testing.
 - `python -m app.runtime.health_check --mode laptop` checks Python, imports, profile/model paths, writable folders, config values, and simulated source access.
-- `python -m app.runtime.health_check --mode pi` requires a camera index and checks hardware capture readiness.
+- `python -m app.runtime.health_check --mode pi` supports Picamera2/Pi Camera 3 readiness with `--camera-backend picamera2`, and USB/OpenCV readiness with `--camera-backend opencv --camera 0`.
 - Recommended Pi runtime defaults are low-resolution and CPU-friendly:
   - `imgsz=256`
-  - `frame-width=424`
-  - `frame-height=240`
+  - `frame-width=640`
+  - `frame-height=480`
   - `inference-interval-ms=300`
   - snapshots disabled
 
@@ -222,15 +222,15 @@ Expected laptop behavior:
 
 ```bash
 source .venv/bin/activate
-python -m app.runtime.health_check --mode pi --profile yellow_daifuku --camera 0
+python -m app.runtime.health_check --mode pi --profile yellow_daifuku --camera-backend picamera2
 python -m app.runtime.detector_service \
   --profile yellow_daifuku \
-  --camera 0 \
+  --camera-backend picamera2 \
   --host 0.0.0.0 \
   --port 8000 \
   --imgsz 256 \
-  --frame-width 424 \
-  --frame-height 240 \
+  --frame-width 640 \
+  --frame-height 480 \
   --inference-interval-ms 300
 ```
 
@@ -335,11 +335,11 @@ journalctl -u vision.service -f
 ## Hardware-Readiness Checklist
 
 - [ ] `python -m app.runtime.health_check --mode laptop --profile <profile> --camera-source <image>` passes on laptop.
-- [ ] `python -m app.runtime.health_check --mode pi --profile <profile> --camera 0` passes on the deployment machine.
+- [ ] `python -m app.runtime.health_check --mode pi --profile <profile> --camera-backend picamera2` passes on the deployment machine.
 - [ ] Laptop simulation works with `--camera-source` and `--dry-run`.
 - [ ] Laptop real-model test works with `--camera-source` and no `--dry-run`.
 - [ ] Raspberry Pi 5 boots from or writes to reliable external storage.
-- [ ] USB camera appears as `/dev/video0` or configured camera index.
+- [ ] Pi Camera 3 is visible to libcamera/Picamera2, or USB camera appears as `/dev/video0` when using OpenCV.
 - [ ] Camera resolution works at the configured width/height.
 - [ ] Runtime starts without snapshots and dashboard remains responsive.
 - [ ] `/status` reports camera FPS and inference FPS.

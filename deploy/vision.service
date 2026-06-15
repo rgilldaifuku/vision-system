@@ -1,13 +1,12 @@
 [Unit]
-Description=Vision System Runtime
-After=network-online.target
-Wants=network-online.target
+Description=Industrial AI Vision Runtime
+After=network.target
 
 [Service]
 Type=simple
 
-# Change this path if the repository is installed somewhere else.
-WorkingDirectory=/opt/vision-system
+# Change these placeholders if the repository is installed somewhere else.
+WorkingDirectory=/home/pi/vision-system
 
 # The install script rewrites User/Group to the account that ran it unless
 # VISION_SERVICE_USER/VISION_SERVICE_GROUP are provided.
@@ -15,24 +14,15 @@ User=pi
 Group=pi
 
 Environment=PYTHONUNBUFFERED=1
-Environment=VISION_MODEL_PROFILE=yellow_daifuku
-Environment=VISION_CAMERA_INDEX=0
-Environment=VISION_HOST=0.0.0.0
-Environment=VISION_PORT=8000
-Environment=VISION_IMGSZ=256
-Environment=VISION_FRAME_WIDTH=424
-Environment=VISION_FRAME_HEIGHT=240
-Environment=VISION_INFERENCE_INTERVAL_MS=300
-Environment=VISION_SNAPSHOT_INTERVAL_MS=1000
 
 # Snapshot mode is intentionally off by default for production/HMI use.
 # To enable debug snapshots, either add --enable-snapshot below or set:
 # Environment=VISION_ENABLE_SNAPSHOT=true
 #
 # Bench simulation only:
-# Environment=VISION_CAMERA_SOURCE=/opt/vision-system/samples/test.jpg
+# Environment=VISION_CAMERA_SOURCE=/home/pi/vision-system/samples/test.jpg
 # Environment=VISION_DRY_RUN=true
-ExecStart=/opt/vision-system/.venv/bin/python -m app.runtime.detector_service
+ExecStart=/home/pi/vision-system/.venv/bin/python -m app.runtime.detector_service --profile yellow_daifuku --camera-backend picamera2 --host 0.0.0.0 --port 8000 --imgsz 256 --frame-width 640 --frame-height 480 --inference-interval-ms 300
 
 Restart=always
 RestartSec=5

@@ -1,40 +1,9 @@
-python -m app.runtime.detector_service \
- --profile yellow_daifuku \
- --camera-source samples/test.jpg \
- --dry-run \
- --host 127.0.0.1 \
- --port 8000
-
-python -m app.runtime.detector_service \
- --profile yellow_daifuku \
- --camera 0 \
- --host 127.0.0.1 \
- --port 8000
-
-#raspberry pi
-
-ssh ansible@172.28.91.77
-ssh ansible@100000008fadccdd
-ssh pi@172.28.91.77
-
-#
-source .venv/bin/activate
-
-pip install -r requirements.txt
-
-python -m app.main --profile yellow_daifuku --camera 0 --host 0.0.0.0 --port 8000
-
-python -m app.runtime.detector_service --profile yellow_daifuku --camera 0 --host 0.0.0.0 --port 8000
-#
-
-python -m app.runtime.detector_service  --profile yellow_daifuku  --camera 0  --host 127.0.0.1  --port 8000
-
 # Industrial AI Vision System Prototype
 
 This repository is a prototype industrial vision system for detecting objects or defects with a mounted camera. It has two main modes:
 
 - **Desktop engineering app** for image collection, dataset validation, YOLO training, model reports, and live engineering checks.
-- **Runtime service** for Raspberry Pi 5 / industrial PC deployment with a USB camera, lightweight browser/HMI dashboard, stable detection state, logs, and review-image capture.
+- **Runtime service** for Raspberry Pi 5 / industrial PC deployment with Pi Camera 3, USB/OpenCV cameras, or simulated image sources, plus a lightweight browser/HMI dashboard, stable detection state, logs, and review-image capture.
 
 Training is intended to happen on a desktop/laptop. The Raspberry Pi runtime is intended to run an already-trained model reliably.
 
@@ -63,9 +32,11 @@ app/
     detector_service.py    # Raspberry Pi / industrial PC runtime service
     camera_manager.py      # Reconnecting OpenCV camera wrapper
     camera_sources.py      # Simulated image/folder/video camera source
+    picamera2_manager.py   # Picamera2/libcamera camera wrapper
     health_check.py        # Local/Pi runtime readiness checks
     inspection_logic.py    # Target filtering, ROI, stable detection state
     output_manager.py      # Runtime CSV output hook
+    action_manager.py      # Safe local action/status JSON layer
 
 training/
   train_pipeline.py        # Dataset validation, YOLO training, model packaging
@@ -99,7 +70,8 @@ Prototype target:
 
 - Raspberry Pi 5, 8 GB RAM.
 - External SSD recommended for models, logs, and review images.
-- USB webcam at `/dev/video0` for prototype capture.
+- Raspberry Pi Camera Module 3 through Picamera2/libcamera for the first Pi demo.
+- USB webcam at `/dev/video0` remains supported through OpenCV.
 - Later production camera may be industrial USB or GigE.
 - Desktop/laptop is used for training and model management.
 
@@ -186,18 +158,28 @@ The training pipeline validates labels before starting YOLO training. Successful
 
 ## Runtime / Raspberry Pi Workflow
 
-Recommended runtime command for the current prototype:
+Recommended Raspberry Pi 5 + Pi Camera Module 3 runtime command:
+
+```bash
+python -m app.runtime.detector_service \
+  --profile yellow_daifuku \
+  --camera-backend picamera2 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --imgsz 256 \
+  --frame-width 640 \
+  --frame-height 480 \
+  --inference-interval-ms 300
+```
+
+USB/OpenCV cameras still use:
 
 ```bash
 python -m app.runtime.detector_service \
   --profile yellow_daifuku \
   --camera 0 \
   --host 0.0.0.0 \
-  --port 8000 \
-  --imgsz 256 \
-  --frame-width 424 \
-  --frame-height 240 \
-  --inference-interval-ms 300
+  --port 8000
 ```
 
 Open the dashboard:
@@ -375,17 +357,19 @@ deploy/install_pi.sh
 deploy/start_service.sh
 ```
 
-Edit [deploy/vision.service](deploy/vision.service) if your repository path, user, model profile, camera index, or runtime parameters differ.
+Edit [deploy/vision.service](deploy/vision.service) if your repository path, user, model profile, camera backend, or runtime parameters differ.
 
 Useful checks:
 
 ```bash
-python -m app.runtime.health_check --mode pi --profile yellow_daifuku --camera 0
+python -m app.runtime.health_check --mode pi --profile yellow_daifuku --camera-backend picamera2
 systemctl status vision.service
 journalctl -u vision.service -f
 curl http://127.0.0.1:8000/status
 curl http://127.0.0.1:8000/latest_detection
 ```
+
+See [README_PI_CAMERA3_RUNTIME.md](README_PI_CAMERA3_RUNTIME.md) for Pi Camera 3 setup, camera tests, service notes, and troubleshooting.
 
 ## Future PLC/HMI Integration
 
@@ -401,7 +385,7 @@ The runtime should keep inference and inspection logic separate from output inte
 ## Validation Commands
 
 ```bash
-python -m py_compile app/main.py app/ui.py app/inference.py app/logging.py app/runtime/detector_service.py app/runtime/camera_manager.py app/runtime/camera_sources.py app/runtime/health_check.py app/runtime/inspection_logic.py app/runtime/output_manager.py training/train_pipeline.py
+python -m py_compile app/main.py app/ui.py app/inference.py app/logging.py app/runtime/detector_service.py app/runtime/camera_manager.py app/runtime/camera_sources.py app/runtime/picamera2_manager.py app/runtime/action_manager.py app/runtime/health_check.py app/runtime/inspection_logic.py app/runtime/output_manager.py training/train_pipeline.py
 python -m unittest discover -s tests
 python -m app.runtime.health_check --mode laptop --profile yellow_daifuku --camera-source assets/test.jpg
 ```

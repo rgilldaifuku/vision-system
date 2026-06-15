@@ -29,6 +29,12 @@ class CameraManager:
         self.failure_count = 0
         self.last_reconnect_attempt = 0.0
         self.last_error = ""
+        self.backend = "opencv"
+        self.last_frame_time = None
+
+    @property
+    def connected(self):
+        return self.status == self.CONNECTED
 
     def open(self):
         self.release()
@@ -53,6 +59,7 @@ class CameraManager:
             self.last_error = ""
             return True
 
+        self.last_error = f"OpenCV camera {self.camera_index} did not open"
         self.release()
         self.status = self.FAILED
         return False
@@ -73,9 +80,11 @@ class CameraManager:
             self.status = self.CONNECTED
             self.failure_count = 0
             self.last_error = ""
+            self.last_frame_time = time.time()
             return frame
 
         self.failure_count += 1
+        self.last_error = f"OpenCV camera {self.camera_index} returned no frame"
         if self.failure_count >= self.reconnect_after_failures:
             self.status = self.RECONNECTING
             self._maybe_reconnect()

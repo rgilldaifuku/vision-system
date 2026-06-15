@@ -36,7 +36,9 @@ from app.config import (
 from app.runtime.camera_manager import CameraManager
 from app.runtime.camera_sources import SimulatedCameraSource
 from app.runtime.inspection_logic import InspectionLogic
+from app.runtime.action_manager import ActionManager
 from app.runtime.output_manager import OutputManager
+from app.runtime.picamera2_manager import Picamera2CameraManager
 
 
 BOX_COLORS = {
@@ -53,6 +55,10 @@ PROFILE_CONFIGS_DIR = PROJECT_ROOT / "profiles"
 MODEL_STATUS_LOADED = "Loaded"
 MODEL_STATUS_ERROR = "Error"
 MODEL_STATUS_SIMULATION = "Simulation"
+CAMERA_BACKEND_AUTO = "auto"
+CAMERA_BACKEND_PICAMERA2 = "picamera2"
+CAMERA_BACKEND_OPENCV = "opencv"
+CAMERA_BACKEND_SIMULATED = "simulated"
 
 
 class ProfileConfigError(ValueError):
@@ -352,6 +358,10 @@ DASHBOARD_HTML = """
         <div id="camera-fps" class="value">--</div>
       </div>
       <div class="detail">
+        <div class="label">Camera Backend</div>
+        <div id="camera-backend" class="value">--</div>
+      </div>
+      <div class="detail">
         <div class="label">Inference FPS</div>
         <div id="inference-fps" class="value">--</div>
       </div>
@@ -514,6 +524,7 @@ DASHBOARD_HTML = """
         setText("result-message", latest.result_message || "--");
         setText("timestamp", latest.timestamp || "--");
         setText("camera-fps", formatNumber(status.camera_fps, 1, ""));
+        setText("camera-backend", status.camera_backend || (status.camera && status.camera.backend) || "--");
         setText("inference-fps", formatNumber(status.inference_fps, 1, ""));
         setText("inference-ms", formatNumber(status.last_inference_ms, 0, " ms"));
         setText("runtime-config", formatRuntimeConfig(status));
@@ -564,6 +575,7 @@ class RuntimeDetectorService:
         model_path=None,
         camera_index=CAMERA_INDEX,
         camera_source=None,
+        camera_backend=CAMERA_BACKEND_AUTO,
         dry_run=False,
         confidence=None,
         detection_required_frames=3,
@@ -577,8 +589,10 @@ class RuntimeDetectorService:
     ):
         self.profile_name = profile_name
         self.camera_source = str(camera_source) if camera_source else ""
+        self.camera_backend_requested = camera_backend or CAMERA_BACKEND_AUTO
         self.dry_run = bool(dry_run)
         self.simulation_mode = self.dry_run or bool(self.camera_source)
+        self.runtime_mode = "SIMULATION" if self.simulation_mode else "PRODUCTION"
         self.model_status = MODEL_STATUS_LOADED
         self.model_error = ""
         if self.dry_run:
@@ -624,12 +638,13 @@ class RuntimeDetectorService:
             except Exception as exc:
                 self.model_status = MODEL_STATUS_ERROR
                 self.model_error = str(exc)
-        self.camera = self._create_camera(camera_index, camera_source)
+        self.camera = self._create_camera(camera_index, camera_source, self.camera_backend_requested)
         self.inspection = InspectionLogic(
             target_classes=self.target_classes,
             **self.inspection_rules,
         )
         self.output_manager = OutputManager()
+        self.action_manager = ActionManager(self.profile_config.get("actions") or {})
 
         self.running = False
         self.camera_thread = None
@@ -683,12 +698,28 @@ class RuntimeDetectorService:
                 thread.join(timeout=2.0)
         self.camera.release()
 
-    def _create_camera(self, camera_index, camera_source):
+    def _create_camera(self, camera_index, camera_source, camera_backend):
         if camera_source:
             return SimulatedCameraSource(camera_source)
 
+        if camera_backend == CAMERA_BACKEND_PICAMERA2:
+            return Picamera2CameraManager(
+                frame_width=self.frame_width,
+                frame_height=self.frame_height,
+            )
+
+        if (
+            camera_backend == CAMERA_BACKEND_AUTO
+            and camera_index is None
+            and Picamera2CameraManager.is_available()
+        ):
+            return Picamera2CameraManager(
+                frame_width=self.frame_width,
+                frame_height=self.frame_height,
+            )
+
         return CameraManager(
-            camera_index=camera_index,
+            camera_index=CAMERA_INDEX if camera_index is None else camera_index,
             frame_width=self.frame_width,
             frame_height=self.frame_height,
         )
@@ -705,8 +736,11 @@ class RuntimeDetectorService:
             "model_path": str(self.model_path),
             "model_status": self.model_status,
             "camera_source": self.camera_source,
+            "camera_backend_requested": self.camera_backend_requested,
+            "camera_backend": getattr(self.camera, "backend", self.camera_backend_requested),
             "dry_run": self.dry_run,
             "simulation_mode": self.simulation_mode,
+            "runtime_mode": self.runtime_mode,
             "frame_width": self.frame_width,
             "frame_height": self.frame_height,
             "imgsz": self.imgsz,
@@ -734,9 +768,33 @@ class RuntimeDetectorService:
                 cooldown_seconds=0,
             )
 
+    def _camera_connected(self):
+        return bool(getattr(self.camera, "connected", self.camera.status == "Connected"))
+
+    def _counter_snapshot(self):
+        action_counters = getattr(self.action_manager, "counters", {})
+        return {
+            "pass": action_counters.get("pass", 0),
+            "fail": action_counters.get("fail", 0),
+            "low_confidence": action_counters.get("low_confidence", 0),
+            "no_part": action_counters.get("no_part", 0),
+            "camera_error": action_counters.get("camera_error", 0),
+            "model_error": action_counters.get("model_error", 0),
+            "simulation": action_counters.get("simulation", 0),
+            "stable_detections": self.total_detections,
+            "review_images": self.total_images_saved,
+            "low_confidence_images": self.low_confidence_count,
+            "no_detection_images": self.no_detection_count,
+        }
+
     def get_status(self):
         with self.lock:
             latest = dict(self.latest_detection)
+            camera_connected = self._camera_connected()
+            camera_backend = getattr(self.camera, "backend", self.camera_backend_requested)
+            model_loaded = self.model_status == MODEL_STATUS_LOADED
+            counters = self._counter_snapshot()
+            output_payload = latest.get("output_payload") or getattr(self.output_manager, "last_payload", {})
             return {
                 "running": self.running,
                 "started_at": self.started_at,
@@ -744,8 +802,12 @@ class RuntimeDetectorService:
                 "model_path": str(self.model_path),
                 "model_status": self.model_status,
                 "model_error": self.model_error,
+                "model_loaded": model_loaded,
                 "camera_source": self.camera_source,
+                "camera_backend": camera_backend,
+                "camera_connected": camera_connected,
                 "dry_run": self.dry_run,
+                "runtime_mode": self.runtime_mode,
                 "simulation_mode": self.simulation_mode,
                 "classes": self.classes,
                 "target_classes": sorted(self.target_classes),
@@ -779,7 +841,44 @@ class RuntimeDetectorService:
                 "class_name": latest.get("class_name"),
                 "active_class": latest.get("active_class") or latest.get("class_name"),
                 "latest_detection": latest,
-                "output_payload": getattr(self.output_manager, "last_payload", {}),
+                "output_payload": output_payload,
+                "runtime": {
+                    "profile": self.profile_name,
+                    "runtime_mode": self.runtime_mode,
+                    "simulation_mode": self.simulation_mode,
+                    "running": self.running,
+                },
+                "camera": {
+                    "connected": camera_connected,
+                    "backend": camera_backend,
+                    "width": self.frame_width,
+                    "height": self.frame_height,
+                    "fps": self.camera_fps,
+                    "error": getattr(self.camera, "last_error", "") or None,
+                    "last_frame_time": getattr(self.camera, "last_frame_time", None),
+                },
+                "model": {
+                    "loaded": model_loaded,
+                    "path": str(self.model_path),
+                    "imgsz": self.imgsz,
+                    "error": self.model_error or None,
+                    "status": self.model_status,
+                },
+                "inspection": {
+                    "result": latest.get("inspection_result"),
+                    "message": latest.get("result_message"),
+                    "active_class": latest.get("active_class") or latest.get("class_name"),
+                    "confidence": latest.get("confidence"),
+                    "raw_detection": latest.get("raw_detected"),
+                    "stable_detection": latest.get("stable_detected"),
+                    "saved_image_path": latest.get("saved_image_path") or None,
+                },
+                "performance": {
+                    "inference_ms": self.last_inference_ms,
+                    "inference_fps": self.inference_fps,
+                    "camera_fps": self.camera_fps,
+                },
+                "counters": counters,
             }
 
     def get_latest_detection(self):
@@ -828,6 +927,8 @@ class RuntimeDetectorService:
                         model_status=self.model_status,
                         simulation_mode=self.simulation_mode,
                     )
+                    action_result = self._handle_actions(detection, output_payload)
+                    output_payload["action_result"] = action_result
                     self._update_latest(detection, output_payload)
                     if detection.get("inspection_result") == "CAMERA_ERROR":
                         self.output_manager.log_fault(
@@ -886,6 +987,8 @@ class RuntimeDetectorService:
                     model_status=self.model_status,
                     simulation_mode=self.simulation_mode,
                 )
+                action_result = self._handle_actions(detection, output_payload)
+                output_payload["action_result"] = action_result
                 self._update_latest(detection, output_payload)
             except Exception as exc:
                 self.last_error = str(exc)
@@ -912,6 +1015,38 @@ class RuntimeDetectorService:
     def _mark_inference_started(self):
         self.last_inference_run_time = time.monotonic()
 
+    def _handle_actions(self, detection, output_payload):
+        status_document = self._build_latest_status_document(detection, output_payload)
+        return self.action_manager.handle(status_document)
+
+    def _build_latest_status_document(self, detection, output_payload):
+        camera_backend = getattr(self.camera, "backend", self.camera_backend_requested)
+        return {
+            "timestamp": output_payload.get("timestamp") or datetime.now().isoformat(timespec="seconds"),
+            "profile": self.profile_name,
+            "runtime_mode": self.runtime_mode,
+            "simulation_mode": self.simulation_mode,
+            "camera_backend": camera_backend,
+            "camera_connected": self._camera_connected(),
+            "camera_status": self.camera.status,
+            "camera_error": getattr(self.camera, "last_error", "") or None,
+            "model_loaded": self.model_status == MODEL_STATUS_LOADED,
+            "model_status": self.model_status,
+            "model_path": str(self.model_path),
+            "model_error": self.model_error or None,
+            "inspection_result": detection.get("inspection_result", "NO_PART"),
+            "pass_fail_bool": detection.get("pass_fail_bool"),
+            "active_class": detection.get("active_class") or detection.get("class_name"),
+            "confidence": detection.get("confidence"),
+            "message": detection.get("result_message", ""),
+            "saved_image_path": detection.get("saved_image_path") or None,
+            "counters": self._counter_snapshot(),
+            "inference_ms": self.last_inference_ms,
+            "inference_fps": self.inference_fps,
+            "camera_fps": self.camera_fps,
+            "output_payload": output_payload,
+        }
+
     def _update_latest(self, detection, output_payload=None):
         latest = {
             **detection,
@@ -921,7 +1056,10 @@ class RuntimeDetectorService:
             "model_status": self.model_status,
             "model_error": self.model_error,
             "camera_source": self.camera_source,
+            "camera_backend": getattr(self.camera, "backend", self.camera_backend_requested),
+            "camera_connected": self._camera_connected(),
             "dry_run": self.dry_run,
+            "runtime_mode": self.runtime_mode,
             "simulation_mode": self.simulation_mode,
             "camera_status": self.camera.status,
             "saved_image_path": detection.get("saved_image_path", ""),
@@ -1118,7 +1256,10 @@ class RuntimeDetectorService:
                 "model_status": self.model_status,
                 "model_error": self.model_error,
                 "camera_source": self.camera_source,
+                "camera_backend": getattr(self.camera, "backend", self.camera_backend_requested),
+                "camera_connected": self._camera_connected(),
                 "dry_run": self.dry_run,
+                "runtime_mode": self.runtime_mode,
                 "simulation_mode": self.simulation_mode,
                 "camera_status": self.camera.status,
                 "saved_image_path": "",
@@ -1531,13 +1672,28 @@ def create_app(service):
 
 def main():
     parser = argparse.ArgumentParser(description="Raspberry Pi runtime detection service")
+    camera_index_env = os.getenv("VISION_CAMERA_INDEX")
     parser.add_argument("--profile", default=os.getenv("VISION_MODEL_PROFILE", ACTIVE_MODEL_PROFILE))
     parser.add_argument("--model", default=os.getenv("VISION_MODEL_PATH"))
-    parser.add_argument("--camera", type=int, default=int(os.getenv("VISION_CAMERA_INDEX", CAMERA_INDEX)))
+    parser.add_argument(
+        "--camera",
+        type=int,
+        default=int(camera_index_env) if camera_index_env else None,
+        help="OpenCV/USB camera index. Passing this keeps legacy USB camera behavior.",
+    )
     parser.add_argument(
         "--camera-source",
         default=os.getenv("VISION_CAMERA_SOURCE"),
         help="Use an image, image folder, or video file instead of a physical camera.",
+    )
+    parser.add_argument(
+        "--camera-backend",
+        choices=(CAMERA_BACKEND_AUTO, CAMERA_BACKEND_PICAMERA2, CAMERA_BACKEND_OPENCV),
+        default=os.getenv("VISION_CAMERA_BACKEND", CAMERA_BACKEND_AUTO),
+        help=(
+            "Physical camera backend. auto uses --camera-source first, then Picamera2 if "
+            "available, then OpenCV."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -1584,6 +1740,7 @@ def main():
             model_path=args.model,
             camera_index=args.camera,
             camera_source=args.camera_source,
+            camera_backend=args.camera_backend,
             dry_run=args.dry_run,
             confidence=args.confidence,
             detection_required_frames=args.detection_required_frames,
