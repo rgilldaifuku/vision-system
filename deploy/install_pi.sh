@@ -25,21 +25,32 @@ sudo apt-get install -y \
   python3-picamera2 \
   python3-libcamera \
   libcamera-apps \
+  python3-opencv \
+  python3-numpy \
+  python3-flask \
+  python3-yaml \
+  python3-requests \
   libgl1 \
   libglib2.0-0 \
   libjpeg62-turbo \
   libopenblas0
 
+sudo apt-get install -y python3-psutil || true
+
 # Picamera2 is usually provided by Raspberry Pi OS packages, not plain pip.
 # --system-site-packages lets the venv see python3-picamera2/python3-libcamera.
 python3 -m venv --system-site-packages "$PROJECT_DIR/.venv"
 "$PROJECT_DIR/.venv/bin/python" -m pip install --upgrade pip
-"$PROJECT_DIR/.venv/bin/python" -m pip install -r "$PROJECT_DIR/requirements.txt"
+"$PROJECT_DIR/.venv/bin/python" -m pip install -r "$PROJECT_DIR/requirements-pi-runtime.txt"
+"$PROJECT_DIR/.venv/bin/python" -m pip uninstall -y numpy opencv-python opencv-contrib-python || true
 
 mkdir -p \
   "$PROJECT_DIR/data/datasets" \
   "$PROJECT_DIR/data/logs" \
   "$PROJECT_DIR/data/review_images" \
+  "$PROJECT_DIR/data/debug_frames/raw" \
+  "$PROJECT_DIR/data/debug_frames/annotated" \
+  "$PROJECT_DIR/data/debug_frames/manual" \
   "$PROJECT_DIR/models"
 
 sudo install -m 0644 "$SCRIPT_DIR/vision.service" "$SERVICE_FILE"

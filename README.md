@@ -79,6 +79,14 @@ Prototype target:
 
 Use Python 3.10+.
 
+**Raspberry Pi runtime warning:** do not run `pip install -r requirements.txt` on the Pi runtime. That file is for desktop/training and can install pip NumPy/OpenCV wheels that break apt-installed Picamera2/libcamera. On Raspberry Pi use:
+
+```bash
+deploy/install_pi_runtime.sh
+```
+
+See [README_PI_RUNTIME_SETUP.md](README_PI_RUNTIME_SETUP.md) for the Pi-specific install, validation, runtime, and detection-debug workflow.
+
 Recommended local setup:
 
 ```bash

@@ -19,15 +19,21 @@ CAMERA_BACKEND_PICAMERA2 = "picamera2"
 CAMERA_BACKEND_OPENCV = "opencv"
 
 
-REQUIRED_IMPORTS = {
+DESKTOP_IMPORTS = {
     "PySide6": "PySide6",
+}
+COMMON_RUNTIME_IMPORTS = {
     "cv2": "opencv-python",
     "flask": "Flask",
     "numpy": "numpy",
-    "torch": "torch",
-    "torchvision": "torchvision",
-    "ultralytics": "ultralytics",
     "yaml": "PyYAML",
+}
+MODEL_RUNTIME_IMPORTS = {
+    "torch": "torch",
+    "ultralytics": "ultralytics",
+}
+PI_RUNTIME_IMPORTS = {
+    "picamera2": "python3-picamera2",
 }
 RUNTIME_MODULES = (
     "app.runtime.detector_service",
@@ -71,6 +77,11 @@ def create_parser():
     parser.add_argument("--camera", type=int)
     parser.add_argument("--camera-source")
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Skip model/YOLO import checks for dashboard/runtime dry-run validation.",
+    )
+    parser.add_argument(
         "--camera-backend",
         choices=(CAMERA_BACKEND_AUTO, CAMERA_BACKEND_PICAMERA2, CAMERA_BACKEND_OPENCV),
         default=CAMERA_BACKEND_AUTO,
@@ -93,7 +104,8 @@ def main():
     print(f"Camera backend: {args.camera_backend}")
 
     check_python(check)
-    check_imports(check)
+    check_imports(check, args)
+    check_pi_package_origins(check, args)
     check_runtime_imports(check)
     check_runtime_config(check, args)
     check_profile_and_model(check, args)
@@ -116,14 +128,46 @@ def check_python(check):
         check.fail(f"Python 3.10+ required, found {version.major}.{version.minor}.{version.micro}")
 
 
-def check_imports(check):
-    for module_name, package_name in REQUIRED_IMPORTS.items():
+def check_imports(check, args):
+    imports = dict(COMMON_RUNTIME_IMPORTS)
+    if not args.dry_run:
+        imports.update(MODEL_RUNTIME_IMPORTS)
+    if args.mode == "laptop":
+        imports.update(DESKTOP_IMPORTS)
+    else:
+        imports.update(PI_RUNTIME_IMPORTS)
+        check.warn("Skipping PySide6 check in Pi mode; it is only required for the desktop app.")
+
+    for module_name, package_name in imports.items():
         try:
             importlib.import_module(module_name)
         except Exception as exc:
             check.fail(f"Cannot import {module_name} ({package_name}): {exc}")
         else:
             check.ok(f"Imported {module_name} ({package_name})")
+
+
+def check_pi_package_origins(check, args):
+    if args.mode != "pi":
+        return
+
+    for module_name, label in (("numpy", "NumPy"), ("cv2", "OpenCV")):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+
+        module_path = Path(getattr(module, "__file__", "")).resolve()
+        check.ok(f"{label} path: {module_path}")
+        if ".venv" in module_path.parts or "site-packages" in module_path.parts:
+            check.fail(
+                f"{label} is loading from a venv/pip path ({module_path}). "
+                "On Raspberry Pi runtime it should come from apt/system packages."
+            )
+        elif "dist-packages" not in module_path.parts:
+            check.warn(
+                f"{label} is not clearly from /usr/lib/python3/dist-packages: {module_path}"
+            )
 
 
 def check_runtime_imports(check):
@@ -163,7 +207,10 @@ def check_runtime_config(check, args):
 def check_profile_and_model(check, args):
     profile_dir = MODELS_DIR / args.profile
     if not profile_dir.exists():
-        check.fail(f"Model profile path does not exist: {profile_dir}")
+        if args.dry_run:
+            check.warn(f"Model profile path does not exist, but dry-run is enabled: {profile_dir}")
+        else:
+            check.fail(f"Model profile path does not exist: {profile_dir}")
         return
 
     check.ok(f"Model profile exists: {profile_dir}")
@@ -197,6 +244,8 @@ def check_profile_and_model(check, args):
     model_path = resolve_model_path(profile_dir, config, args.model)
     if model_path.exists():
         check.ok(f"Model file exists: {model_path}")
+    elif args.dry_run:
+        check.warn(f"Model file does not exist, but dry-run is enabled: {model_path}")
     else:
         check.fail(f"Model file does not exist: {model_path}")
 

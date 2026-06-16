@@ -1,0 +1,14 @@
+# Raspberry Pi runtime-only pip dependencies.
+#
+# Do NOT add numpy, opencv-python, or opencv-contrib-python here.
+# On Raspberry Pi OS Bookworm, those must come from apt/system packages:
+#   python3-numpy, python3-opencv, python3-picamera2, python3-libcamera
+# Mixing pip NumPy/OpenCV with apt Picamera2/simplejpeg can break the camera
+# stack through binary ABI incompatibilities.
+#
+# Ultralytics may attempt to resolve heavy dependencies. The Pi installer
+# removes pip NumPy/OpenCV after installation so the venv keeps using system
+# site packages for camera-critical libraries.
+ultralytics
+requests
+psutil

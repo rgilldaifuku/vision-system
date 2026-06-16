@@ -14,13 +14,20 @@ The runtime is status-first. Smooth browser video is not the production goal. `-
 
 ## Setup
 
+Preferred one-command runtime setup:
+
+```bash
+deploy/install_pi_runtime.sh
+```
+
+Do not install the desktop/training `requirements.txt` on the Pi runtime. See [README_PI_RUNTIME_SETUP.md](README_PI_RUNTIME_SETUP.md) for the reason and the full repeatable workflow.
+
 ```bash
 ssh pi@<pi-ip>
 cd <repo>
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements-pi-runtime.txt
 ```
 
 Picamera2 is normally installed from Raspberry Pi OS packages, not plain pip:

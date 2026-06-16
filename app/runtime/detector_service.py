@@ -27,6 +27,7 @@ from app.config import (
     MODELS_DIR,
     PROJECT_ROOT,
     REVIEW_IMAGES_DIR,
+    DATA_DIR,
     ROI_ENABLED,
     ROI_X1,
     ROI_X2,
@@ -51,6 +52,7 @@ DEFAULT_FRAME_HEIGHT = 480
 DEFAULT_INFERENCE_INTERVAL_MS = 200
 DEFAULT_SNAPSHOT_INTERVAL_MS = 1000
 DEFAULT_REVIEW_IMAGE_INTERVAL_SECONDS = 5.0
+DEBUG_FRAMES_DIR = DATA_DIR / "debug_frames"
 PROFILE_CONFIGS_DIR = PROJECT_ROOT / "profiles"
 MODEL_STATUS_LOADED = "Loaded"
 MODEL_STATUS_ERROR = "Error"
@@ -586,6 +588,9 @@ class RuntimeDetectorService:
         inference_interval_ms=DEFAULT_INFERENCE_INTERVAL_MS,
         snapshot_interval_ms=DEFAULT_SNAPSHOT_INTERVAL_MS,
         enable_snapshot=False,
+        debug_detections=False,
+        save_debug_frames=False,
+        debug_frame_limit=20,
     ):
         self.profile_name = profile_name
         self.camera_source = str(camera_source) if camera_source else ""
@@ -628,6 +633,10 @@ class RuntimeDetectorService:
         self.inference_interval_ms = max(0, int(inference_interval_ms))
         self.snapshot_interval_ms = max(0, int(snapshot_interval_ms))
         self.enable_snapshot = bool(enable_snapshot)
+        self.debug_detections = bool(debug_detections)
+        self.save_debug_frames = bool(save_debug_frames or debug_detections)
+        self.debug_frame_limit = max(0, int(debug_frame_limit))
+        self.debug_frame_count = 0
         self.inference_interval_seconds = max(0.0, self.inference_interval_ms / 1000)
         self.snapshot_interval_seconds = max(0.0, self.snapshot_interval_ms / 1000)
 
@@ -746,6 +755,9 @@ class RuntimeDetectorService:
             "imgsz": self.imgsz,
             "inference_interval_ms": self.inference_interval_ms,
             "snapshot_enabled": self.enable_snapshot,
+            "debug_detections": self.debug_detections,
+            "save_debug_frames": self.save_debug_frames,
+            "debug_frame_limit": self.debug_frame_limit,
             "inspection_rules": self.inspection_rules,
         }
 
@@ -834,6 +846,10 @@ class RuntimeDetectorService:
                 "snapshot_interval_ms": self.snapshot_interval_ms,
                 "snapshot_enabled": self.enable_snapshot,
                 "latest_snapshot_at": self.latest_snapshot_at,
+                "debug_detections": self.debug_detections,
+                "save_debug_frames": self.save_debug_frames,
+                "debug_frame_limit": self.debug_frame_limit,
+                "debug_frame_count": self.debug_frame_count,
                 "review_image_interval_seconds": DEFAULT_REVIEW_IMAGE_INTERVAL_SECONDS,
                 "total_detections": self.total_detections,
                 "total_images_saved": self.total_images_saved,
@@ -986,6 +1002,7 @@ class RuntimeDetectorService:
                     simulation_mode=self.simulation_mode,
                 )
                 detection = self._handle_review_images(frame, detection)
+                self._maybe_write_debug_frame(frame, detections, detection)
                 self._maybe_update_snapshot(frame, detections, detection)
                 self._update_runtime_timing(inference_ms)
                 self.last_error = ""
@@ -1210,6 +1227,70 @@ class RuntimeDetectorService:
 
         self.last_review_image_times[category] = now
         return True
+
+    def _maybe_write_debug_frame(self, frame, detections, detection):
+        if not self.debug_detections and not self.save_debug_frames:
+            return
+
+        if self.debug_frame_limit and self.debug_frame_count >= self.debug_frame_limit:
+            return
+
+        self.debug_frame_count += 1
+        timestamp = datetime.now()
+        stem = timestamp.strftime("%Y%m%d_%H%M%S_%f")
+
+        raw_path = ""
+        annotated_path = ""
+        if self.save_debug_frames:
+            raw_dir = DEBUG_FRAMES_DIR / "raw"
+            annotated_dir = DEBUG_FRAMES_DIR / "annotated"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            annotated_dir.mkdir(parents=True, exist_ok=True)
+
+            raw_output = raw_dir / f"{stem}.jpg"
+            annotated_output = annotated_dir / f"{stem}.jpg"
+            if cv2.imwrite(str(raw_output), frame):
+                raw_path = str(raw_output)
+            if cv2.imwrite(str(annotated_output), self._annotate_frame(frame, detections, detection)):
+                annotated_path = str(annotated_output)
+
+        if self.debug_detections:
+            DEBUG_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
+            record = {
+                "timestamp": timestamp.isoformat(timespec="seconds"),
+                "frame_path": raw_path,
+                "annotated_frame_path": annotated_path,
+                "model_path": str(self.model_path),
+                "imgsz": self.imgsz,
+                "confidence_threshold": self.confidence,
+                "raw_detections": self._json_safe(detections),
+                "inspection_result": detection.get("inspection_result"),
+                "roi_config": {
+                    "enabled": self.inspection.roi_enabled,
+                    "x1": self.inspection.roi_x1,
+                    "y1": self.inspection.roi_y1,
+                    "x2": self.inspection.roi_x2,
+                    "y2": self.inspection.roi_y2,
+                },
+                "accepted_classes": sorted(self.inspection.acceptable_classes),
+                "reject_classes": sorted(self.inspection.reject_classes),
+                "target_classes": sorted(self.target_classes),
+                "active_class": detection.get("active_class") or detection.get("class_name"),
+                "message": detection.get("result_message", ""),
+            }
+            debug_log = DEBUG_FRAMES_DIR / "detections_debug.jsonl"
+            with open(debug_log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _json_safe(value):
+        if isinstance(value, dict):
+            return {key: RuntimeDetectorService._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [RuntimeDetectorService._json_safe(item) for item in value]
+        if hasattr(value, "item"):
+            return value.item()
+        return value
 
     @staticmethod
     def _review_image_filename(category, class_name=None, confidence=None):
@@ -1713,6 +1794,12 @@ def main():
     parser.add_argument("--host", default=os.getenv("VISION_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("VISION_PORT", "8000")))
     parser.add_argument("--confidence", type=float, default=None)
+    parser.add_argument(
+        "--confidence-threshold-override",
+        type=float,
+        default=None,
+        help="Temporarily override YOLO confidence for low-threshold debugging.",
+    )
     parser.add_argument("--detection-required-frames", type=int, default=3)
     parser.add_argument("--miss-required-frames", type=int, default=3)
     parser.add_argument("--imgsz", type=int, default=int(os.getenv("VISION_IMGSZ", DEFAULT_IMGSZ)))
@@ -1741,7 +1828,30 @@ def main():
         action="store_true",
         default=os.getenv("VISION_ENABLE_SNAPSHOT", "").lower() in {"1", "true", "yes", "on"},
     )
+    parser.add_argument(
+        "--debug-detections",
+        action="store_true",
+        default=os.getenv("VISION_DEBUG_DETECTIONS", "").lower() in {"1", "true", "yes", "on"},
+        help="Write raw YOLO detection debug JSONL records under data/debug_frames/.",
+    )
+    parser.add_argument(
+        "--save-debug-frames",
+        action="store_true",
+        default=os.getenv("VISION_SAVE_DEBUG_FRAMES", "").lower() in {"1", "true", "yes", "on"},
+        help="Save raw and annotated debug frames under data/debug_frames/.",
+    )
+    parser.add_argument(
+        "--debug-frame-limit",
+        type=int,
+        default=int(os.getenv("VISION_DEBUG_FRAME_LIMIT", "20")),
+        help="Maximum number of debug frames/records to write; 0 means unlimited.",
+    )
     args = parser.parse_args()
+    confidence = (
+        args.confidence_threshold_override
+        if args.confidence_threshold_override is not None
+        else args.confidence
+    )
 
     try:
         service = RuntimeDetectorService(
@@ -1751,7 +1861,7 @@ def main():
             camera_source=args.camera_source,
             camera_backend=args.camera_backend,
             dry_run=args.dry_run,
-            confidence=args.confidence,
+            confidence=confidence,
             detection_required_frames=args.detection_required_frames,
             miss_required_frames=args.miss_required_frames,
             imgsz=args.imgsz,
@@ -1760,6 +1870,9 @@ def main():
             inference_interval_ms=args.inference_interval_ms,
             snapshot_interval_ms=args.snapshot_interval_ms,
             enable_snapshot=args.enable_snapshot,
+            debug_detections=args.debug_detections,
+            save_debug_frames=args.save_debug_frames,
+            debug_frame_limit=args.debug_frame_limit,
         )
     except Exception as exc:
         print(f"Runtime failed to initialize: {exc}", file=sys.stderr)
