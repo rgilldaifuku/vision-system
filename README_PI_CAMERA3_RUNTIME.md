@@ -65,6 +65,12 @@ python -m app.runtime.health_check \
   --camera-backend picamera2
 ```
 
+Direct runtime camera-manager smoke test:
+
+```bash
+python scripts/test_picamera2_manager.py
+```
+
 ## Runtime Command
 
 ```bash

@@ -792,6 +792,12 @@ class RuntimeDetectorService:
             latest = dict(self.latest_detection)
             camera_connected = self._camera_connected()
             camera_backend = getattr(self.camera, "backend", self.camera_backend_requested)
+            camera_status = (
+                self.camera.get_status()
+                if hasattr(self.camera, "get_status")
+                else {}
+            )
+            camera_fps = camera_status.get("fps", self.camera_fps)
             model_loaded = self.model_status == MODEL_STATUS_LOADED
             counters = self._counter_snapshot()
             output_payload = latest.get("output_payload") or getattr(self.output_manager, "last_payload", {})
@@ -817,7 +823,7 @@ class RuntimeDetectorService:
                 "camera_last_error": getattr(self.camera, "last_error", ""),
                 "frame_count": self.frame_count,
                 "camera_frame_count": self.camera_frame_count,
-                "camera_fps": self.camera_fps,
+                "camera_fps": camera_fps,
                 "inference_fps": self.inference_fps,
                 "runtime_fps": self.runtime_fps,
                 "last_inference_ms": self.last_inference_ms,
@@ -853,9 +859,12 @@ class RuntimeDetectorService:
                     "backend": camera_backend,
                     "width": self.frame_width,
                     "height": self.frame_height,
-                    "fps": self.camera_fps,
-                    "error": getattr(self.camera, "last_error", "") or None,
-                    "last_frame_time": getattr(self.camera, "last_frame_time", None),
+                    "fps": camera_fps,
+                    "error": camera_status.get("error") or getattr(self.camera, "last_error", "") or None,
+                    "last_frame_time": camera_status.get(
+                        "last_frame_time",
+                        getattr(self.camera, "last_frame_time", None),
+                    ),
                 },
                 "model": {
                     "loaded": model_loaded,
@@ -876,7 +885,7 @@ class RuntimeDetectorService:
                 "performance": {
                     "inference_ms": self.last_inference_ms,
                     "inference_fps": self.inference_fps,
-                    "camera_fps": self.camera_fps,
+                    "camera_fps": camera_fps,
                 },
                 "counters": counters,
             }

@@ -457,6 +457,80 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(camera.status, "Failed")
             self.assertIn("Picamera2", camera.last_error)
 
+    def test_picamera2_manager_uses_background_cached_frames(self):
+        class FakeRequest:
+            def __init__(self, value):
+                self.value = value
+                self.released = False
+
+            def make_array(self, stream_name):
+                self.stream_name = stream_name
+                frame = np.zeros((8, 10, 3), dtype=np.uint8)
+                frame[:, :, 0] = self.value
+                frame[:, :, 1] = 2
+                frame[:, :, 2] = 3
+                return frame
+
+            def release(self):
+                self.released = True
+
+        class FakePicamera2:
+            requests = []
+
+            def __init__(self):
+                self.started = False
+                self.closed = False
+                self.count = 0
+
+            def create_video_configuration(self, **kwargs):
+                self.config_kwargs = kwargs
+                return {"config": kwargs}
+
+            def configure(self, config):
+                self.config = config
+
+            def start(self):
+                self.started = True
+
+            def capture_request(self):
+                self.count += 1
+                request = FakeRequest(self.count)
+                FakePicamera2.requests.append(request)
+                time.sleep(0.005)
+                return request
+
+            def stop(self):
+                self.started = False
+
+            def close(self):
+                self.closed = True
+
+        FakePicamera2.requests = []
+        with mock.patch.object(Picamera2CameraManager, "_import_picamera2", return_value=FakePicamera2):
+            camera = Picamera2CameraManager(
+                frame_width=10,
+                frame_height=8,
+                warmup_seconds=0,
+                max_stale_seconds=1.0,
+            )
+            try:
+                self.assertTrue(camera.open(), camera.last_error)
+                frame = None
+                for _ in range(50):
+                    frame = camera.read_frame()
+                    if frame is not None and camera.camera_fps > 0:
+                        break
+                    time.sleep(0.02)
+
+                self.assertIsNotNone(frame)
+                self.assertEqual(frame.shape, (8, 10, 3))
+                self.assertEqual(camera.status, "Connected")
+                self.assertEqual(camera.last_error, "")
+                self.assertGreater(camera.camera_fps, 0)
+            finally:
+                camera.release()
+            self.assertTrue(all(request.released for request in FakePicamera2.requests))
+
     def test_action_manager_writes_latest_status_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             status_path = Path(tmpdir) / "latest_status.json"

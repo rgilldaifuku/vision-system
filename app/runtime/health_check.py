@@ -3,6 +3,7 @@ import importlib
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from app.config import DATA_DIR, LOGS_DIR, MODELS_DIR, PROJECT_ROOT, REVIEW_IMAGES_DIR
@@ -352,7 +353,14 @@ def check_picamera2_camera(check, args, required=True):
             _camera_check_issue(check, camera.last_error or "Picamera2 camera did not open", required)
             return False
 
-        frame = camera.read_frame()
+        frame = None
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            frame = camera.read_frame()
+            if frame is not None:
+                break
+            time.sleep(0.05)
+
         if frame is None:
             _camera_check_issue(
                 check,
@@ -361,7 +369,11 @@ def check_picamera2_camera(check, args, required=True):
             )
             return False
 
-        check.ok(f"Picamera2 returned frame {frame.shape[1]}x{frame.shape[0]}")
+        status = camera.get_status()
+        check.ok(
+            f"Picamera2 returned frame {frame.shape[1]}x{frame.shape[0]} "
+            f"at {status.get('fps', 0.0):.2f} fps"
+        )
         return True
     finally:
         camera.release()
