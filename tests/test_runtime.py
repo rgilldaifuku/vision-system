@@ -18,9 +18,18 @@ import app.runtime.health_check as health_check
 from app.runtime.camera_profile import CameraProfileError, load_camera_profile
 from app.runtime.action_manager import ActionManager
 from app.runtime.camera_sources import SimulatedCameraSource
+from app.runtime.image_quality import (
+    BLURRY,
+    GOOD,
+    INVALID_FRAME,
+    TOO_BRIGHT,
+    TOO_DARK,
+    compute_image_quality,
+)
 from app.runtime.inspection_logic import InspectionLogic
 from app.runtime.output_manager import OutputManager
 from app.runtime.picamera2_manager import Picamera2CameraManager
+from app.runtime.preprocessing import apply_roi, preprocess_for_inference
 
 
 class DummyOutputManager:
@@ -482,10 +491,75 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(profile.fps, 30)
             self.assertFalse(profile.roi.enabled)
             self.assertTrue(profile.preprocessing.brightness_check)
+            self.assertTrue(profile.quality.enabled)
+            self.assertEqual(profile.quality.min_brightness, 40.0)
+            self.assertFalse(profile.quality.skip_inference_on_bad_quality)
 
     def test_missing_camera_profile_has_clear_error(self):
         with self.assertRaisesRegex(CameraProfileError, "Camera profile not found"):
             load_camera_profile("does_not_exist")
+
+    def test_image_quality_detects_dark_bright_blurry_and_invalid_frames(self):
+        dark = np.zeros((40, 40, 3), dtype=np.uint8)
+        bright = np.full((40, 40, 3), 255, dtype=np.uint8)
+        blurry = np.full((40, 40, 3), 120, dtype=np.uint8)
+        checker = np.indices((40, 40)).sum(axis=0) % 2
+        good = np.dstack([checker * 255, (1 - checker) * 255, checker * 255]).astype(np.uint8)
+
+        self.assertEqual(compute_image_quality(dark)["quality_status"], TOO_DARK)
+        self.assertEqual(compute_image_quality(bright)["quality_status"], TOO_BRIGHT)
+        self.assertEqual(compute_image_quality(blurry)["quality_status"], BLURRY)
+        self.assertEqual(compute_image_quality(None)["quality_status"], INVALID_FRAME)
+        self.assertEqual(
+            compute_image_quality(good, {"min_brightness": 1, "max_brightness": 254, "min_blur_score": 1, "min_contrast": 1, "max_overexposed_pct": 60, "max_underexposed_pct": 60})["quality_status"],
+            GOOD,
+        )
+
+    def test_roi_cropping_and_invalid_roi_clamping(self):
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        cropped, metadata = apply_roi(
+            frame,
+            {"enabled": True, "x1": 0.25, "y1": 0.2, "x2": 0.75, "y2": 0.8},
+        )
+        self.assertEqual(cropped.shape[:2], (60, 100))
+        self.assertTrue(metadata["roi_enabled"])
+        self.assertEqual(metadata["roi_pixels"], {"x1": 50, "y1": 20, "x2": 150, "y2": 80})
+
+        clamped, clamped_metadata = apply_roi(
+            frame,
+            {"enabled": True, "x1": 2, "y1": -1, "x2": 0.5, "y2": 0.5},
+        )
+        self.assertGreater(clamped.shape[0], 0)
+        self.assertGreater(clamped.shape[1], 0)
+        self.assertEqual(clamped_metadata["roi_normalized"], {"x1": 0.5, "y1": 0.0, "x2": 1.0, "y2": 0.5})
+
+    def test_preprocessing_metadata_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "camera.yaml"
+            profile_path.write_text(
+                "name: test_camera\n"
+                "backend: opencv\n"
+                "width: 100\n"
+                "height: 80\n"
+                "rotation: 90\n"
+                "flip_horizontal: true\n"
+                "roi:\n"
+                "  enabled: true\n"
+                "  x1: 0.0\n"
+                "  y1: 0.0\n"
+                "  x2: 0.5\n"
+                "  y2: 1.0\n",
+                encoding="utf-8",
+            )
+            profile = load_camera_profile(profile_path)
+            frame = np.zeros((80, 100, 3), dtype=np.uint8)
+            processed, metadata = preprocess_for_inference(frame, profile, imgsz=64)
+
+            self.assertEqual(processed.shape[:2], (64, 64))
+            self.assertTrue(metadata["applied"])
+            self.assertTrue(metadata["transforms"]["transformed"])
+            self.assertTrue(metadata["roi_enabled"])
+            self.assertEqual(metadata["resized_to"], {"width": 64, "height": 64})
 
     def test_camera_only_status_does_not_load_inference(self):
         with mock.patch.object(
@@ -763,6 +837,7 @@ class RuntimeTests(unittest.TestCase):
                 }
                 result = service._handle_review_images(frame, stable_low)
                 self.assertTrue(result["saved_image_path"])
+                self.assertTrue(Path(result["saved_image_path"]).with_suffix(".json").exists())
 
                 no_detection = {
                     "stable_detected": False,

@@ -21,6 +21,8 @@ DEFAULT_ACTIONS = {
     "SIMULATION": ["log_event", "write_latest_status_json"],
     "CAMERA_ONLY": ["log_event", "write_latest_status_json"],
     "INFERENCE_DISABLED": ["log_event", "write_latest_status_json"],
+    "IMAGE_QUALITY_ERROR": ["log_event", "write_latest_status_json", "increment_counter"],
+    "QUALITY_CHECK_ERROR": ["log_event", "write_latest_status_json", "increment_counter"],
 }
 
 
@@ -47,6 +49,8 @@ class ActionManager:
             "camera_error": 0,
             "model_error": 0,
             "simulation": 0,
+            "image_quality_error": 0,
+            "quality_check_error": 0,
         }
         self.last_error = ""
 

@@ -32,6 +32,18 @@ class CameraPreprocessing:
 
 
 @dataclass
+class CameraQuality:
+    enabled: bool = True
+    min_brightness: float = 40.0
+    max_brightness: float = 220.0
+    min_blur_score: float = 50.0
+    min_contrast: float = 15.0
+    max_overexposed_pct: float = 20.0
+    max_underexposed_pct: float = 20.0
+    skip_inference_on_bad_quality: bool = False
+
+
+@dataclass
 class CameraProfile:
     name: str
     backend: str = "auto"
@@ -47,6 +59,7 @@ class CameraProfile:
     white_balance: str = "auto"
     roi: CameraRoi = field(default_factory=CameraRoi)
     preprocessing: CameraPreprocessing = field(default_factory=CameraPreprocessing)
+    quality: CameraQuality = field(default_factory=CameraQuality)
     path: str = ""
 
     def to_dict(self):
@@ -102,6 +115,10 @@ def build_camera_profile(raw, profile_path=None):
     if not isinstance(preprocessing, dict):
         raise CameraProfileError("Camera profile preprocessing must be an object")
 
+    quality = raw.get("quality") or {}
+    if not isinstance(quality, dict):
+        raise CameraProfileError("Camera profile quality must be an object")
+
     return CameraProfile(
         name=name,
         backend=backend,
@@ -127,6 +144,24 @@ def build_camera_profile(raw, profile_path=None):
             brightness_check=_bool(preprocessing.get("brightness_check", True)),
             blur_check=_bool(preprocessing.get("blur_check", True)),
             color_normalization=_bool(preprocessing.get("color_normalization", False)),
+        ),
+        quality=CameraQuality(
+            enabled=_bool(quality.get("enabled", True)),
+            min_brightness=_float(quality.get("min_brightness", 40), "quality.min_brightness"),
+            max_brightness=_float(quality.get("max_brightness", 220), "quality.max_brightness"),
+            min_blur_score=_float(quality.get("min_blur_score", 50), "quality.min_blur_score"),
+            min_contrast=_float(quality.get("min_contrast", 15), "quality.min_contrast"),
+            max_overexposed_pct=_float(
+                quality.get("max_overexposed_pct", 20),
+                "quality.max_overexposed_pct",
+            ),
+            max_underexposed_pct=_float(
+                quality.get("max_underexposed_pct", 20),
+                "quality.max_underexposed_pct",
+            ),
+            skip_inference_on_bad_quality=_bool(
+                quality.get("skip_inference_on_bad_quality", False)
+            ),
         ),
         path=str(profile_path or ""),
     )
@@ -180,10 +215,14 @@ def _rotation(value):
 def _optional_float(value, name):
     if value is None or value == "":
         return None
+    return _float(value, name)
+
+
+def _float(value, name):
     try:
         return float(value)
     except (TypeError, ValueError) as exc:
-        raise CameraProfileError(f"Camera profile {name} must be numeric or null") from exc
+        raise CameraProfileError(f"Camera profile {name} must be numeric") from exc
 
 
 def _unit_float(value, name):

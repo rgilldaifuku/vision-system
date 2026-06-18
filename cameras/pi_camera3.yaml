@@ -21,3 +21,12 @@ preprocessing:
   brightness_check: true
   blur_check: true
   color_normalization: false
+quality:
+  enabled: true
+  min_brightness: 40
+  max_brightness: 220
+  min_blur_score: 50
+  min_contrast: 15
+  max_overexposed_pct: 20
+  max_underexposed_pct: 20
+  skip_inference_on_bad_quality: false

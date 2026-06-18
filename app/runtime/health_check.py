@@ -41,9 +41,11 @@ RUNTIME_MODULES = (
     "app.runtime.camera_profile",
     "app.runtime.camera_sources",
     "app.runtime.health_check",
+    "app.runtime.image_quality",
     "app.runtime.inspection_logic",
     "app.runtime.inference_engine",
     "app.runtime.output_manager",
+    "app.runtime.preprocessing",
     "app.runtime.action_manager",
     "app.runtime.picamera2_manager",
 )
@@ -111,6 +113,7 @@ def main():
     check_pi_package_origins(check, args)
     check_runtime_imports(check)
     check_camera_profiles(check, args)
+    check_validation_scripts(check)
     check_runtime_config(check, args)
     check_profile_and_model(check, args)
     check_write_permissions(check)
@@ -207,6 +210,11 @@ def check_camera_profiles(check, args):
                 f"Camera profile '{profile_name}' loaded: "
                 f"{profile.backend} {profile.width}x{profile.height}@{profile.fps}"
             )
+            check.ok(
+                f"Camera profile '{profile_name}' quality checks: "
+                f"enabled={profile.quality.enabled}, "
+                f"skip_inference_on_bad_quality={profile.quality.skip_inference_on_bad_quality}"
+            )
 
     if args.camera_profile:
         try:
@@ -218,6 +226,28 @@ def check_camera_profiles(check, args):
                 f"Requested camera profile loaded: "
                 f"{profile.name} ({profile.backend} {profile.width}x{profile.height})"
             )
+            check.ok(
+                f"Requested quality thresholds: brightness "
+                f"{profile.quality.min_brightness}-{profile.quality.max_brightness}, "
+                f"blur>={profile.quality.min_blur_score}, "
+                f"contrast>={profile.quality.min_contrast}"
+            )
+
+
+def check_validation_scripts(check):
+    scripts = (
+        PROJECT_ROOT / "scripts" / "validate_camera.py",
+        PROJECT_ROOT / "scripts" / "validate_model.py",
+        PROJECT_ROOT / "scripts" / "validate_runtime.py",
+    )
+    for script in scripts:
+        if script.exists():
+            check.ok(f"Validation script exists: {script}")
+        else:
+            check.warn(f"Validation script is missing: {script}")
+
+    sidecar_note = "Review/debug/model-test image JSON sidecars are written when images are saved."
+    check.ok(sidecar_note)
 
 
 def check_runtime_config(check, args):

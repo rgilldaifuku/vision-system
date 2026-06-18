@@ -16,6 +16,8 @@ Training is intended to happen on a desktop/laptop. The Raspberry Pi runtime is 
 - Switch model profiles in the desktop app.
 - Run a lightweight runtime service with `/status`, `/latest_detection`, `/snapshot.jpg`, and `/`.
 - Keep production dashboard status-first: PASS/FAIL style status, confidence, counters, timings, camera health, and review-image capture.
+- Report image quality metrics such as brightness, blur, contrast, overexposure, and underexposure.
+- Apply camera-profile preprocessing such as rotation, flips, ROI crop, and optional letterbox standardization before runtime inference.
 - Save structured detection logs and rate-limited review images for retraining.
 
 Smooth browser video is intentionally **not** the production goal. Snapshot mode is optional/debug only.
@@ -33,6 +35,8 @@ app/
     camera_manager.py      # Reconnecting OpenCV camera wrapper
     camera_sources.py      # Simulated image/folder/video camera source
     picamera2_manager.py   # Picamera2/libcamera camera wrapper
+    image_quality.py       # Brightness/blur/contrast/exposure checks
+    preprocessing.py       # Camera transforms, ROI crop, frame standardization
     health_check.py        # Local/Pi runtime readiness checks
     inspection_logic.py    # Target filtering, ROI, stable detection state
     output_manager.py      # Runtime CSV output hook
@@ -179,13 +183,22 @@ Recommended Raspberry Pi 5 + Pi Camera Module 3 runtime command:
 ```bash
 python -m app.runtime.detector_service \
   --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
   --camera-backend picamera2 \
+  --prefer-edge-model \
+  --model-format auto \
   --host 0.0.0.0 \
   --port 8000 \
   --imgsz 256 \
   --frame-width 640 \
   --frame-height 480 \
   --inference-interval-ms 300
+```
+
+Camera-only dashboard for validating the camera, focus, lighting, and dashboard without loading YOLO/PyTorch/NCNN:
+
+```bash
+scripts/run_camera_dashboard.sh
 ```
 
 USB/OpenCV cameras still use:
@@ -208,6 +221,8 @@ The runtime:
 
 - Loads `models/<profile>/config.json`, `classes.txt`, and the configured model file.
 - Reads camera frames continuously.
+- Applies camera-profile transforms, ROI, and preprocessing in a standard pipeline.
+- Computes image quality metrics before inference so lighting/focus/setup problems are visible.
 - Runs YOLO on a throttled interval, not every camera frame.
 - Maintains stable detection state.
 - Reconnects the camera after failures.
@@ -250,6 +265,45 @@ Current result states:
 - `CAMERA_ERROR` - the camera source is failed or reconnecting.
 - `MODEL_ERROR` - the requested model/profile cannot be loaded or used.
 - `SIMULATION` - dry-run or simulated camera-source mode is active, so the result is not a production decision.
+- `CAMERA_ONLY` - camera/dashboard mode is active and inference is intentionally disabled.
+- `INFERENCE_DISABLED` - the runtime shell is alive but model prediction is intentionally skipped.
+- `IMAGE_QUALITY_ERROR` - image quality failed and the active camera profile is configured to skip inference on bad quality.
+- `QUALITY_CHECK_ERROR` - image quality analysis failed unexpectedly.
+
+## Image Quality And Preprocessing
+
+Most industrial vision failures come from lighting, focus, camera position, reflections, dirty lenses, weak datasets, or ROI mismatch. Phase 2 adds lightweight diagnostics for those setup issues.
+
+Camera profiles in `cameras/` can define:
+
+- rotation and horizontal/vertical flips
+- normalized ROI crop
+- preprocessing enablement and color normalization
+- quality thresholds for brightness, contrast, blur, overexposure, and underexposure
+- whether bad quality should skip inference
+
+Runtime `/status` now includes:
+
+- `image_quality`
+- `preprocessing`
+- `camera_profile_details`
+
+Review/debug/model-test images get a matching `.json` sidecar with model/profile, detections, image quality, preprocessing, ROI, and result metadata. These sidecars make the retraining loop easier: collect evidence, label hard cases, retrain on desktop, export NCNN, redeploy to Pi.
+
+Validation commands:
+
+```bash
+python scripts/validate_camera.py --camera-profile pi_camera3 --duration 10
+python scripts/validate_model.py --profile yellow_daifuku --image data/debug_frames/camera_validation/<image>.jpg --prefer-edge-model --model-format auto
+python scripts/validate_runtime.py --profile yellow_daifuku --camera-profile pi_camera3 --duration 15 --prefer-edge-model --model-format auto
+```
+
+Quality warnings mean:
+
+- `TOO_DARK` / `TOO_BRIGHT`: adjust lighting, exposure, aperture, or object position.
+- `BLURRY`: check focus, vibration, motion blur, lens cleanliness, and mounting.
+- `LOW_CONTRAST`: improve lighting angle/background or revisit the inspection ROI.
+- high over/underexposed percentage: reduce glare, reflections, shadows, or saturation.
 
 Runtime inspection rules can be added in:
 
@@ -378,7 +432,7 @@ Edit [deploy/vision.service](deploy/vision.service) if your repository path, use
 Useful checks:
 
 ```bash
-python -m app.runtime.health_check --mode pi --profile yellow_daifuku --camera-backend picamera2
+python -m app.runtime.health_check --mode pi --profile yellow_daifuku --camera-profile pi_camera3 --camera-backend picamera2
 systemctl status vision.service
 journalctl -u vision.service -f
 curl http://127.0.0.1:8000/status
@@ -405,6 +459,27 @@ python -m py_compile app/main.py app/ui.py app/inference.py app/logging.py app/r
 python -m unittest discover -s tests
 python -m app.runtime.health_check --mode laptop --profile yellow_daifuku --camera-source assets/test.jpg
 ```
+
+## Safe Cleanup Commands
+
+Generated runtime/debug files are ignored by Git. To clean local caches and generated outputs without deleting datasets or models:
+
+```bash
+find . -type d -name __pycache__ -prune -exec rm -rf {} +
+find . -type f -name '*.pyc' -delete
+find data/datasets -type f -name '*.cache' -delete
+rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov
+rm -rf data/debug_frames/*
+rm -f data/logs/*.csv data/logs/*.json
+```
+
+Review images may be useful retraining evidence. Delete them only after saving anything useful:
+
+```bash
+rm -rf data/review_images/*
+```
+
+See [REPOSITORY_CLEANUP_REPORT.md](REPOSITORY_CLEANUP_REPORT.md) for the current audit notes and files intentionally left for manual review.
 
 ## Notes
 

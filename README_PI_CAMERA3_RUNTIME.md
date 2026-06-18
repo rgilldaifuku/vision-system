@@ -95,6 +95,48 @@ models/yellow_daifuku/best_ncnn_model/
 
 The Pi runtime launcher prefers this folder automatically. If only `best.pt` exists, the Pi may crash during inference with `Illegal instruction`.
 
+## Camera Quality And Preprocessing
+
+The runtime now checks image quality before inference and reports the result in `/status` and on the dashboard. Metrics include brightness, blur score, contrast, overexposed percentage, and underexposed percentage.
+
+Run camera validation:
+
+```bash
+python scripts/validate_camera.py --camera-profile pi_camera3 --duration 10
+```
+
+Run model validation on a captured frame:
+
+```bash
+python scripts/validate_model.py \
+  --profile yellow_daifuku \
+  --image data/debug_frames/camera_validation/<image>.jpg \
+  --prefer-edge-model \
+  --model-format auto
+```
+
+Run full pipeline validation without requiring Flask:
+
+```bash
+python scripts/validate_runtime.py \
+  --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
+  --duration 15 \
+  --prefer-edge-model \
+  --model-format auto
+```
+
+Changing cameras can change color response, lens distortion, focus, exposure, and field of view. Camera profiles plus preprocessing reduce unnecessary retraining by keeping orientation, ROI, and frame preparation consistent.
+
+Quality warning meaning:
+
+- `TOO_DARK` or `TOO_BRIGHT`: adjust lighting/exposure or reduce shadows/glare.
+- `BLURRY`: check focus, vibration, lens cleanliness, and object motion.
+- `LOW_CONTRAST`: improve background/lighting separation or refine ROI.
+- high over/underexposed percentage: reduce reflections, saturation, or deep shadows.
+
+Every saved review/debug/model-test image gets a `.json` sidecar with image quality, preprocessing, ROI, model, and inspection metadata.
+
 ## Runtime Command
 
 ```bash

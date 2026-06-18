@@ -36,7 +36,14 @@ from app.runtime.inference_engine import (
     MODEL_FORMAT_PT,
     resolve_model_path,
 )
+from app.runtime.image_quality import (
+    GOOD as IMAGE_QUALITY_GOOD,
+    QUALITY_CHECK_ERROR,
+    compute_image_quality,
+    quality_thresholds_from_config,
+)
 from app.runtime.inspection_logic import InspectionLogic, normalize_class_name
+from app.runtime.preprocessing import apply_camera_transforms, apply_roi, standardize_frame
 from app.runtime.action_manager import ActionManager
 from app.runtime.output_manager import OutputManager
 from app.runtime.picamera2_manager import Picamera2CameraManager
@@ -60,6 +67,7 @@ MODEL_STATUS_SIMULATION = "Simulation"
 MODEL_STATUS_DISABLED = "Disabled"
 INSPECTION_RESULT_CAMERA_ONLY = "CAMERA_ONLY"
 INSPECTION_RESULT_INFERENCE_DISABLED = "INFERENCE_DISABLED"
+INSPECTION_RESULT_IMAGE_QUALITY_ERROR = "IMAGE_QUALITY_ERROR"
 CAMERA_BACKEND_AUTO = "auto"
 CAMERA_BACKEND_PICAMERA2 = "picamera2"
 CAMERA_BACKEND_OPENCV = "opencv"
@@ -394,6 +402,38 @@ DASHBOARD_HTML = """
         <div class="label">Runtime Mode</div>
         <div id="runtime-mode" class="value">--</div>
       </div>
+      <div class="detail">
+        <div class="label">Image Quality</div>
+        <div id="quality-status" class="badge warn">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Brightness</div>
+        <div id="quality-brightness" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Blur Score</div>
+        <div id="quality-blur" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Contrast</div>
+        <div id="quality-contrast" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Exposure</div>
+        <div id="quality-exposure" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">ROI</div>
+        <div id="roi-status" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Camera Profile</div>
+        <div id="camera-profile-ui" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Preprocessing</div>
+        <div id="preprocessing-status" class="value">--</div>
+      </div>
     </section>
 
     <section class="status-card">
@@ -497,6 +537,16 @@ DASHBOARD_HTML = """
       return result || "--";
     }
 
+    function qualityState(status) {
+      if (status === "GOOD" || status === "DISABLED") {
+        return "ok";
+      }
+      if (status === "NO_FRAME") {
+        return "warn";
+      }
+      return "bad";
+    }
+
     function refreshSnapshot() {
       if (!SNAPSHOT_ENABLED) {
         return;
@@ -562,6 +612,23 @@ DASHBOARD_HTML = """
         );
         setText("snapshot-mode", status.snapshot_enabled ? "Debug On" : "Off");
         setText("runtime-mode", status.runtime_mode || (status.simulation_mode ? "SIMULATION" : "Production"));
+        var quality = status.image_quality || latest.image_quality || {};
+        var preprocessing = status.preprocessing || latest.preprocessing || {};
+        var cameraProfile = status.camera_profile_details || {};
+        var qualityStatus = quality.quality_status || "--";
+        setText("quality-status", qualityStatus);
+        setBoxState("quality-status", qualityState(qualityStatus));
+        setText("quality-brightness", formatNumber(quality.brightness_mean, 1, ""));
+        setText("quality-blur", formatNumber(quality.blur_score, 1, ""));
+        setText("quality-contrast", formatNumber(quality.contrast_score, 1, ""));
+        setText(
+          "quality-exposure",
+          formatNumber(quality.overexposed_pct, 1, "% over") + " / " +
+          formatNumber(quality.underexposed_pct, 1, "% under")
+        );
+        setText("roi-status", preprocessing.roi_enabled ? "Enabled" : "Disabled");
+        setText("camera-profile-ui", cameraProfile.name || status.camera_profile || "--");
+        setText("preprocessing-status", preprocessing.preprocessing_enabled ? "Enabled" : "Disabled");
         setText("profile-name", status.profile_name || latest.profile_name || "--");
         setText("model-path", status.model_path || latest.model_path || "--");
         setText("browser-updated", new Date().toLocaleTimeString());
@@ -711,6 +778,17 @@ class RuntimeDetectorService:
         self.debug_frame_count = 0
         self.inference_interval_seconds = max(0.0, self.inference_interval_ms / 1000)
         self.snapshot_interval_seconds = max(0.0, self.snapshot_interval_ms / 1000)
+        self.quality_thresholds = quality_thresholds_from_config(
+            self.camera_profile.quality if self.camera_profile else None
+        )
+        self.quality_enabled = bool(
+            self.camera_profile.quality.enabled if self.camera_profile else True
+        )
+        self.skip_inference_on_bad_quality = bool(
+            self.camera_profile.quality.skip_inference_on_bad_quality
+            if self.camera_profile
+            else False
+        )
 
         self.model = None
         if (
@@ -739,6 +817,8 @@ class RuntimeDetectorService:
         self.camera_frame_count = 0
         self.last_error = ""
         self.started_at = None
+        self.latest_image_quality = self._empty_image_quality()
+        self.latest_preprocessing = self._empty_preprocessing_metadata()
         self.latest_detection = self._empty_detection()
         self.latest_snapshot_jpeg = None
         self.latest_snapshot_at = None
@@ -842,6 +922,12 @@ class RuntimeDetectorService:
             "debug_detections": self.debug_detections,
             "save_debug_frames": self.save_debug_frames,
             "debug_frame_limit": self.debug_frame_limit,
+            "image_quality_enabled": self.quality_enabled,
+            "quality_thresholds": self.quality_thresholds,
+            "skip_inference_on_bad_quality": self.skip_inference_on_bad_quality,
+            "preprocessing": (
+                self.camera_profile.to_dict().get("preprocessing") if self.camera_profile else None
+            ),
             "inspection_rules": self.inspection_rules,
         }
 
@@ -877,6 +963,8 @@ class RuntimeDetectorService:
             "camera_error": action_counters.get("camera_error", 0),
             "model_error": action_counters.get("model_error", 0),
             "simulation": action_counters.get("simulation", 0),
+            "image_quality_error": action_counters.get("image_quality_error", 0),
+            "quality_check_error": action_counters.get("quality_check_error", 0),
             "stable_detections": self.total_detections,
             "review_images": self.total_images_saved,
             "low_confidence_images": self.low_confidence_count,
@@ -897,6 +985,9 @@ class RuntimeDetectorService:
             model_loaded = self.model_status == MODEL_STATUS_LOADED
             counters = self._counter_snapshot()
             output_payload = latest.get("output_payload") or getattr(self.output_manager, "last_payload", {})
+            image_quality = dict(self.latest_image_quality)
+            preprocessing = dict(self.latest_preprocessing)
+            camera_profile_payload = self.camera_profile.to_dict() if self.camera_profile else None
             return {
                 "running": self.running,
                 "started_at": self.started_at,
@@ -909,7 +1000,7 @@ class RuntimeDetectorService:
                 "model_loaded": model_loaded,
                 "camera_source": self.camera_source,
                 "camera_profile": self.camera_profile_name,
-                "camera_profile_config": self.camera_profile.to_dict() if self.camera_profile else None,
+                "camera_profile_config": camera_profile_payload,
                 "camera_backend": camera_backend,
                 "camera_connected": camera_connected,
                 "camera_only": self.camera_only,
@@ -955,6 +1046,8 @@ class RuntimeDetectorService:
                 "active_class": latest.get("active_class") or latest.get("class_name"),
                 "latest_detection": latest,
                 "output_payload": output_payload,
+                "image_quality": image_quality,
+                "preprocessing": preprocessing,
                 "runtime": {
                     "profile": self.profile_name,
                     "runtime_mode": self.runtime_mode,
@@ -974,6 +1067,19 @@ class RuntimeDetectorService:
                     "last_frame_time": camera_status.get(
                         "last_frame_time",
                         getattr(self.camera, "last_frame_time", None),
+                    ),
+                },
+                "camera_profile_details": {
+                    "name": self.camera_profile.name if self.camera_profile else None,
+                    "backend": self.camera_profile.backend if self.camera_profile else camera_backend,
+                    "width": self.camera_profile.width if self.camera_profile else self.frame_width,
+                    "height": self.camera_profile.height if self.camera_profile else self.frame_height,
+                    "fps": self.camera_profile.fps if self.camera_profile else None,
+                    "quality": (
+                        camera_profile_payload.get("quality") if camera_profile_payload else None
+                    ),
+                    "preprocessing": (
+                        camera_profile_payload.get("preprocessing") if camera_profile_payload else None
                     ),
                 },
                 "model": {
@@ -1024,31 +1130,9 @@ class RuntimeDetectorService:
                 time.sleep(0.02)
                 continue
 
-            frame = self._apply_camera_profile_transforms(frame)
             self._update_camera_timing()
             with self.lock:
                 self.latest_camera_frame = frame
-
-    def _apply_camera_profile_transforms(self, frame):
-        if not self.camera_profile:
-            return frame
-
-        output = frame
-        if self.camera_profile.rotation == 90:
-            output = cv2.rotate(output, cv2.ROTATE_90_CLOCKWISE)
-        elif self.camera_profile.rotation == 180:
-            output = cv2.rotate(output, cv2.ROTATE_180)
-        elif self.camera_profile.rotation == 270:
-            output = cv2.rotate(output, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-        if self.camera_profile.flip_horizontal and self.camera_profile.flip_vertical:
-            output = cv2.flip(output, -1)
-        elif self.camera_profile.flip_horizontal:
-            output = cv2.flip(output, 1)
-        elif self.camera_profile.flip_vertical:
-            output = cv2.flip(output, 0)
-
-        return output
 
     def _inference_loop(self):
         while self.running:
@@ -1097,11 +1181,32 @@ class RuntimeDetectorService:
             try:
                 self._mark_inference_started()
                 inference_started = time.perf_counter()
+                processed_frame, preprocessing_metadata, image_quality = self._prepare_runtime_frame(frame)
                 if self.inference_disabled:
                     detections = []
                     detection = self._disabled_inference_detection()
                     inference_ms = 0.0
-                    self._maybe_update_snapshot(frame, detections, detection)
+                    detection = self._attach_frame_metadata(detection, image_quality, preprocessing_metadata)
+                    self._maybe_update_snapshot(processed_frame, detections, detection)
+                    self._update_runtime_timing(inference_ms)
+                    output_payload = self.output_manager.handle_detection(
+                        active_profile=self.profile_name,
+                        detection=detection,
+                        camera_status=self.camera.status,
+                        model_status=self.model_status,
+                        simulation_mode=self.simulation_mode,
+                    )
+                    action_result = self._handle_actions(detection, output_payload)
+                    output_payload["action_result"] = action_result
+                    self._update_latest(detection, output_payload)
+                    continue
+
+                if self._should_skip_for_quality(image_quality):
+                    detections = []
+                    inference_ms = (time.perf_counter() - inference_started) * 1000
+                    detection = self._image_quality_error_detection(image_quality)
+                    detection = self._attach_frame_metadata(detection, image_quality, preprocessing_metadata)
+                    self._maybe_update_snapshot(processed_frame, detections, detection)
                     self._update_runtime_timing(inference_ms)
                     output_payload = self.output_manager.handle_detection(
                         active_profile=self.profile_name,
@@ -1116,7 +1221,7 @@ class RuntimeDetectorService:
                     continue
 
                 if self.dry_run:
-                    detections = self._fake_detections(frame)
+                    detections = self._fake_detections(processed_frame)
                 elif self.model_status == MODEL_STATUS_ERROR or self.model is None:
                     detections = []
                     self.output_manager.log_fault(
@@ -1127,7 +1232,7 @@ class RuntimeDetectorService:
                     )
                 else:
                     results = self.model.predict(
-                        frame,
+                        processed_frame,
                         confidence=self.confidence,
                         imgsz=self.imgsz,
                     )
@@ -1135,14 +1240,15 @@ class RuntimeDetectorService:
                 inference_ms = (time.perf_counter() - inference_started) * 1000
                 detection = self.inspection.update(
                     detections,
-                    frame.shape,
+                    processed_frame.shape,
                     camera_status=self.camera.status,
                     model_status=self.model_status,
                     simulation_mode=self.simulation_mode,
                 )
-                detection = self._handle_review_images(frame, detection)
-                self._maybe_write_debug_frame(frame, detections, detection)
-                self._maybe_update_snapshot(frame, detections, detection)
+                detection = self._attach_frame_metadata(detection, image_quality, preprocessing_metadata)
+                detection = self._handle_review_images(processed_frame, detection, detections)
+                self._maybe_write_debug_frame(processed_frame, detections, detection)
+                self._maybe_update_snapshot(processed_frame, detections, detection)
                 self._update_runtime_timing(inference_ms)
                 self.last_error = ""
                 output_payload = self.output_manager.handle_detection(
@@ -1180,6 +1286,122 @@ class RuntimeDetectorService:
     def _mark_inference_started(self):
         self.last_inference_run_time = time.monotonic()
 
+    def _prepare_runtime_frame(self, frame):
+        transformed_frame, transform_meta = apply_camera_transforms(frame, self.camera_profile)
+        roi_frame, roi_meta = apply_roi(
+            transformed_frame,
+            getattr(self.camera_profile, "roi", None),
+        )
+        image_quality = self._compute_quality(roi_frame)
+        preprocessing = getattr(self.camera_profile, "preprocessing", None)
+        preprocessing_enabled = bool(getattr(preprocessing, "enabled", True))
+        color_normalization = bool(getattr(preprocessing, "color_normalization", False))
+        if preprocessing_enabled:
+            processed_frame, standardize_meta = standardize_frame(
+                roi_frame,
+                target_size=self.imgsz,
+                color_normalization=color_normalization,
+            )
+        else:
+            processed_frame = roi_frame
+            standardize_meta = {
+                "applied": False,
+                "resized_to": None,
+                "letterbox": False,
+                "scale": 1.0,
+                "pad": {"left": 0, "top": 0, "right": 0, "bottom": 0},
+                "color_normalization": False,
+            }
+        preprocessing_metadata = {
+            "applied": bool(
+                transform_meta.get("transformed")
+                or roi_meta.get("applied")
+                or standardize_meta.get("applied")
+            ),
+            "transforms": transform_meta,
+            "roi_enabled": bool(roi_meta.get("roi_enabled")),
+            "roi_pixels": roi_meta.get("roi_pixels"),
+            "roi_normalized": roi_meta.get("roi_normalized"),
+            "roi_applied": bool(roi_meta.get("applied")),
+            "preprocessing_enabled": preprocessing_enabled,
+            "resized_to": standardize_meta.get("resized_to"),
+            "letterbox": standardize_meta.get("letterbox"),
+            "scale": standardize_meta.get("scale"),
+            "pad": standardize_meta.get("pad"),
+            "color_normalization": color_normalization,
+            "input_shape": self._frame_shape(frame),
+            "quality_shape": self._frame_shape(roi_frame),
+            "output_shape": self._frame_shape(processed_frame),
+        }
+        with self.lock:
+            self.latest_preprocessing = preprocessing_metadata
+            self.latest_image_quality = image_quality
+        return processed_frame, preprocessing_metadata, image_quality
+
+    @staticmethod
+    def _frame_shape(frame):
+        if frame is None or not hasattr(frame, "shape"):
+            return None
+        height, width = frame.shape[:2]
+        channels = frame.shape[2] if len(frame.shape) > 2 else 1
+        return {"height": int(height), "width": int(width), "channels": int(channels)}
+
+    def _compute_quality(self, frame):
+        if not self.quality_enabled:
+            quality = compute_image_quality(frame, self.quality_thresholds)
+            quality["quality_status"] = "DISABLED"
+            quality["message"] = "Image quality checks are disabled."
+            return quality
+        return compute_image_quality(frame, self.quality_thresholds)
+
+    def _should_skip_for_quality(self, image_quality):
+        if not self.skip_inference_on_bad_quality:
+            return False
+        status = (image_quality or {}).get("quality_status")
+        return status not in {IMAGE_QUALITY_GOOD, "DISABLED"}
+
+    def _image_quality_error_detection(self, image_quality):
+        status = (image_quality or {}).get("quality_status") or QUALITY_CHECK_ERROR
+        message = (image_quality or {}).get("message") or f"Image quality status is {status}."
+        result = (
+            QUALITY_CHECK_ERROR
+            if status == QUALITY_CHECK_ERROR
+            else INSPECTION_RESULT_IMAGE_QUALITY_ERROR
+        )
+        return {
+            "inspection_result": result,
+            "pass_fail_bool": False,
+            "result_message": message,
+            "stable_detected": False,
+            "raw_detected": False,
+            "class_name": None,
+            "active_class": None,
+            "confidence": None,
+            "stable_detection_count": 0,
+            "detection_frame_count": 0,
+            "miss_frame_count": 0,
+            "target_classes": sorted(self.target_classes),
+            "acceptable_classes": sorted(self.inspection.acceptable_classes),
+            "reject_classes": sorted(self.inspection.reject_classes),
+            "minimum_confidence": self.inspection.minimum_confidence,
+            "allow_simulation": self.inspection.allow_simulation,
+            "roi_enabled": self.inspection.roi_enabled,
+            "roi": {
+                "x1": self.inspection.roi_x1,
+                "y1": self.inspection.roi_y1,
+                "x2": self.inspection.roi_x2,
+                "y2": self.inspection.roi_y2,
+            },
+            "saved_image_path": "",
+        }
+
+    @staticmethod
+    def _attach_frame_metadata(detection, image_quality, preprocessing_metadata):
+        detection = dict(detection)
+        detection["image_quality"] = image_quality or {}
+        detection["preprocessing"] = preprocessing_metadata or {}
+        return detection
+
     def _handle_actions(self, detection, output_payload):
         status_document = self._build_latest_status_document(detection, output_payload)
         return self.action_manager.handle(status_document)
@@ -1212,6 +1434,8 @@ class RuntimeDetectorService:
             "inference_ms": self.last_inference_ms,
             "inference_fps": self.inference_fps,
             "camera_fps": self.camera_fps,
+            "image_quality": detection.get("image_quality") or self.latest_image_quality,
+            "preprocessing": detection.get("preprocessing") or self.latest_preprocessing,
             "output_payload": output_payload,
         }
 
@@ -1237,6 +1461,8 @@ class RuntimeDetectorService:
             "simulation_mode": self.simulation_mode,
             "camera_status": self.camera.status,
             "saved_image_path": detection.get("saved_image_path", ""),
+            "image_quality": detection.get("image_quality") or dict(self.latest_image_quality),
+            "preprocessing": detection.get("preprocessing") or dict(self.latest_preprocessing),
         }
         latest["output_payload"] = output_payload or OutputManager.build_output_payload(
             active_profile=self.profile_name,
@@ -1283,7 +1509,7 @@ class RuntimeDetectorService:
             self.runtime_fps = self.inference_fps
             self.frame_count += 1
 
-    def _handle_review_images(self, frame, detection):
+    def _handle_review_images(self, frame, detection, raw_detections=None):
         detection = dict(detection)
         detection["saved_image_path"] = ""
         self._update_detection_count(detection)
@@ -1295,6 +1521,8 @@ class RuntimeDetectorService:
                 self._save_review_image(
                     frame,
                     "detections",
+                    detection,
+                    raw_detections,
                     detection.get("class_name"),
                     detection.get("confidence"),
                 )
@@ -1305,6 +1533,8 @@ class RuntimeDetectorService:
                 self._save_review_image(
                     frame,
                     "low_confidence",
+                    detection,
+                    raw_detections,
                     detection.get("class_name"),
                     detection.get("confidence"),
                 )
@@ -1314,7 +1544,7 @@ class RuntimeDetectorService:
             not detection.get("raw_detected")
             and detection.get("inspection_result", "NO_PART") == "NO_PART"
         ):
-            saved_paths.append(self._save_review_image(frame, "no_detection"))
+            saved_paths.append(self._save_review_image(frame, "no_detection", detection, raw_detections))
 
         saved_paths = [str(path) for path in saved_paths if path]
         if saved_paths:
@@ -1344,7 +1574,15 @@ class RuntimeDetectorService:
         except (TypeError, ValueError):
             return False
 
-    def _save_review_image(self, frame, category, class_name=None, confidence=None):
+    def _save_review_image(
+        self,
+        frame,
+        category,
+        detection=None,
+        raw_detections=None,
+        class_name=None,
+        confidence=None,
+    ):
         if not self._review_image_due(category):
             return None
 
@@ -1356,6 +1594,12 @@ class RuntimeDetectorService:
 
         if not cv2.imwrite(str(output_path), frame):
             return None
+        self._write_image_sidecar(
+            output_path,
+            category,
+            detection=detection or {},
+            raw_detections=raw_detections or [],
+        )
 
         with self.lock:
             self.total_images_saved += 1
@@ -1399,8 +1643,20 @@ class RuntimeDetectorService:
             annotated_output = annotated_dir / f"{stem}.jpg"
             if cv2.imwrite(str(raw_output), frame):
                 raw_path = str(raw_output)
+                self._write_image_sidecar(
+                    raw_output,
+                    "debug_raw",
+                    detection=detection,
+                    raw_detections=detections,
+                )
             if cv2.imwrite(str(annotated_output), self._annotate_frame(frame, detections, detection)):
                 annotated_path = str(annotated_output)
+                self._write_image_sidecar(
+                    annotated_output,
+                    "debug_annotated",
+                    detection=detection,
+                    raw_detections=detections,
+                )
 
         if self.debug_detections:
             DEBUG_FRAMES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1429,6 +1685,44 @@ class RuntimeDetectorService:
             debug_log = DEBUG_FRAMES_DIR / "detections_debug.jsonl"
             with open(debug_log, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def _write_image_sidecar(self, image_path, category, detection=None, raw_detections=None):
+        detection = detection or {}
+        image_quality = detection.get("image_quality") or self.latest_image_quality
+        preprocessing = detection.get("preprocessing") or self.latest_preprocessing
+        sidecar_path = Path(image_path).with_suffix(".json")
+        metadata = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "profile": self.profile_name,
+            "camera_profile": self.camera_profile_name or None,
+            "model_path": str(self.model_path),
+            "model_format": self.model_format,
+            "runtime_mode": self.runtime_mode,
+            "inspection_result": detection.get("inspection_result"),
+            "result_message": detection.get("result_message"),
+            "raw_detections": self._json_safe(raw_detections or []),
+            "stable_detection": detection.get("stable_detected"),
+            "confidence": detection.get("confidence"),
+            "class_name": detection.get("class_name"),
+            "image_quality": self._json_safe(image_quality),
+            "preprocessing": self._json_safe(preprocessing),
+            "roi_used": self._json_safe(
+                preprocessing.get("roi_normalized")
+                if isinstance(preprocessing, dict)
+                else None
+            ),
+            "frame_width": image_quality.get("width") if isinstance(image_quality, dict) else None,
+            "frame_height": image_quality.get("height") if isinstance(image_quality, dict) else None,
+            "saved_image_category": category,
+            "image_path": str(image_path),
+        }
+        try:
+            sidecar_path.write_text(
+                json.dumps(metadata, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            self.last_error = f"Could not write image sidecar {sidecar_path}: {exc}"
 
     @staticmethod
     def _json_safe(value):
@@ -1484,6 +1778,46 @@ class RuntimeDetectorService:
             self.latest_snapshot_jpeg = buffer.tobytes()
             self.latest_snapshot_at = datetime.now().isoformat(timespec="seconds")
 
+    @staticmethod
+    def _empty_image_quality():
+        return {
+            "brightness_mean": None,
+            "brightness_std": None,
+            "contrast_score": None,
+            "blur_score": None,
+            "overexposed_pct": None,
+            "underexposed_pct": None,
+            "width": 0,
+            "height": 0,
+            "timestamp": None,
+            "quality_status": "NO_FRAME",
+            "message": "No frame has been processed yet.",
+        }
+
+    @staticmethod
+    def _empty_preprocessing_metadata():
+        return {
+            "applied": False,
+            "transforms": {
+                "rotation": 0,
+                "flip_horizontal": False,
+                "flip_vertical": False,
+                "transformed": False,
+            },
+            "roi_enabled": False,
+            "roi_pixels": None,
+            "roi_normalized": {"x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 1.0},
+            "roi_applied": False,
+            "preprocessing_enabled": False,
+            "resized_to": None,
+            "letterbox": False,
+            "scale": 1.0,
+            "pad": {"left": 0, "top": 0, "right": 0, "bottom": 0},
+            "color_normalization": False,
+            "input_shape": None,
+            "output_shape": None,
+        }
+
     def _empty_detection(self):
         if self.inference_disabled:
             detection = self._disabled_inference_detection()
@@ -1510,6 +1844,8 @@ class RuntimeDetectorService:
                 "simulation_mode": self.simulation_mode,
                 "camera_status": self.camera.status,
                 "saved_image_path": "",
+                "image_quality": dict(self.latest_image_quality),
+                "preprocessing": dict(self.latest_preprocessing),
             }
         )
         detection["output_payload"] = self.output_manager.build_output_payload(

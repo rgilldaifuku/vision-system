@@ -47,6 +47,8 @@ The installer:
 - Removes pip `numpy`, `opencv-python`, and `opencv-contrib-python` if they were pulled in.
 - Prints the file paths for NumPy and OpenCV so you can confirm they are not loading from `.venv`.
 
+Do not run `pip install -r requirements.txt` on the Pi. That file is for desktop/training and can install incompatible pip NumPy/OpenCV wheels.
+
 ## Validate
 
 ```bash
@@ -124,6 +126,52 @@ models/yellow_daifuku/best_ncnn_model/
 ```
 
 The Pi launcher uses `--prefer-edge-model --model-format auto`, so it will prefer `best_ncnn_model/` when present and only fall back to `.pt` if no NCNN export exists. On Raspberry Pi 4, `.pt` inference may fail with `Illegal instruction`; NCNN is the recommended deployment format.
+
+## Phase 2 Camera Quality Validation
+
+The runtime now computes brightness, blur, contrast, overexposed percentage, and underexposed percentage. These checks help diagnose lighting, focus, reflections, camera movement, dirty lenses, bad ROI, and setup drift before assuming the model is bad.
+
+Camera profile quality thresholds live in:
+
+```text
+cameras/pi_camera3.yaml
+cameras/usb_webcam.yaml
+```
+
+Run camera validation first:
+
+```bash
+python scripts/validate_camera.py --camera-profile pi_camera3 --duration 10
+```
+
+This writes a sample image and JSON report under:
+
+```text
+data/debug_frames/camera_validation/
+```
+
+Then run model validation on the saved image:
+
+```bash
+python scripts/validate_model.py \
+  --profile yellow_daifuku \
+  --image data/debug_frames/camera_validation/<image>.jpg \
+  --prefer-edge-model \
+  --model-format auto
+```
+
+Finally run pipeline validation:
+
+```bash
+python scripts/validate_runtime.py \
+  --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
+  --duration 15 \
+  --prefer-edge-model \
+  --model-format auto
+```
+
+The dashboard and `/status` expose `image_quality`, `preprocessing`, and camera-profile details. Review/debug/model-test images also get `.json` sidecars for retraining evidence.
 
 ## Camera Profiles And Runtime Modes
 
@@ -225,3 +273,21 @@ http://<pi-ip>:8000
 ```
 
 Snapshot mode stays off by default. The production runtime is status-first, not smooth-video-first.
+
+## Safe Cleanup
+
+The Pi runtime generates logs, debug frames, snapshots, and review images. These are ignored by Git. To clear local generated files without touching datasets or models:
+
+```bash
+find . -type d -name __pycache__ -prune -exec rm -rf {} +
+find . -type f -name '*.pyc' -delete
+find data/datasets -type f -name '*.cache' -delete
+rm -rf data/debug_frames/*
+rm -f data/logs/*.csv data/logs/*.json
+```
+
+Review images are part of the retraining feedback loop. Delete them only after copying useful cases elsewhere:
+
+```bash
+rm -rf data/review_images/*
+```

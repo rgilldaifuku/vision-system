@@ -1,14 +1,26 @@
+# Python cache/build artifacts
 __pycache__/
+**/__pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
+*.egg-info/
 
 runs/
 data/runs/
 data/logs/
 data/review_images/
 data/debug_frames/
-data/logs/latest_status.json
+data/calibration/
+data/runtime/
+data/snapshots/
+data/**/*.cache
 C:/Temp/
 
 *.pt

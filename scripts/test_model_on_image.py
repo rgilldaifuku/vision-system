@@ -23,6 +23,7 @@ from app.runtime.inference_engine import (
     resolve_model_path,
 )
 from app.runtime.inspection_logic import normalize_class_name
+from app.runtime.image_quality import compute_image_quality
 
 
 def main():
@@ -99,7 +100,28 @@ def main():
     output_path = output_dir / f"{args.profile}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
     annotated = results[0].plot()
     cv2.imwrite(str(output_path), annotated)
+    sidecar_path = output_path.with_suffix(".json")
+    sidecar_path.write_text(
+        json.dumps(
+            {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "profile": args.profile,
+                "model_path": str(model_path),
+                "model_format": model_format,
+                "class_list": classes,
+                "model_names": engine.names,
+                "raw_detections": detections,
+                "image_quality": compute_image_quality(read_image(image_path)),
+                "saved_image_category": "model_test_annotated",
+                "image_path": str(output_path),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     print(f"Annotated image: {output_path}")
+    print(f"Metadata JSON: {sidecar_path}")
 
 
 def install_sigill_message():
