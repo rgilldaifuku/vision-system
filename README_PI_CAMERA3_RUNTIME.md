@@ -69,6 +69,7 @@ Runtime health check:
 python -m app.runtime.health_check \
   --mode pi \
   --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
   --camera-backend picamera2
 ```
 
@@ -99,6 +100,7 @@ The Pi runtime launcher prefers this folder automatically. If only `best.pt` exi
 ```bash
 python -m app.runtime.detector_service \
   --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
   --camera-backend picamera2 \
   --prefer-edge-model \
   --model-format auto \
@@ -115,6 +117,46 @@ Open the dashboard from another machine:
 ```text
 http://<pi-ip>:8000
 ```
+
+## Camera-Only Dashboard
+
+Use this first when validating a new Pi/camera install. It starts the camera, browser dashboard, API, and `/snapshot.jpg` without loading YOLO, PyTorch, or NCNN:
+
+```bash
+scripts/run_camera_dashboard.sh
+```
+
+Equivalent command:
+
+```bash
+python -m app.runtime.detector_service \
+  --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
+  --camera-only \
+  --enable-snapshot \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+The dashboard will show `CAMERA_ONLY`, model disabled, inference disabled, camera FPS, and the last frame timestamp. Use it to verify focus, lighting, framing, and camera stability before testing NCNN inference.
+
+## Camera Profiles
+
+Camera profiles live in `cameras/`:
+
+```text
+cameras/pi_camera3.yaml
+cameras/usb_webcam.yaml
+```
+
+Profiles define backend, resolution, FPS, rotation, flips, optional ROI, and preprocessing flags. `--camera-profile pi_camera3` selects the Pi Camera 3 defaults. CLI values such as `--frame-width`, `--frame-height`, and `--camera-backend` still override the profile when provided.
+
+Runtime mode summary:
+
+- `--camera-only`: real camera plus dashboard/API/snapshot, no inference engine loaded.
+- `--disable-inference`: normal runtime shell with model prediction intentionally skipped.
+- `--dry-run`: no model loading, simulated detections for dashboard/API testing.
+- Real Pi inference: use `--prefer-edge-model --model-format auto` with `best_ncnn_model/`.
 
 ## API Tests
 

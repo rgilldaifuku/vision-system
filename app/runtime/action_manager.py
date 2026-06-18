@@ -19,6 +19,8 @@ DEFAULT_ACTIONS = {
     "CAMERA_ERROR": ["log_event", "write_latest_status_json", "increment_counter"],
     "MODEL_ERROR": ["log_event", "write_latest_status_json", "increment_counter"],
     "SIMULATION": ["log_event", "write_latest_status_json"],
+    "CAMERA_ONLY": ["log_event", "write_latest_status_json"],
+    "INFERENCE_DISABLED": ["log_event", "write_latest_status_json"],
 }
 
 

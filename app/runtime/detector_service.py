@@ -27,6 +27,7 @@ from app.config import (
     ROI_Y2,
 )
 from app.runtime.camera_manager import CameraManager
+from app.runtime.camera_profile import CameraProfileError, load_camera_profile
 from app.runtime.camera_sources import SimulatedCameraSource
 from app.runtime.inference_engine import (
     InferenceEngine,
@@ -56,6 +57,9 @@ PROFILE_CONFIGS_DIR = PROJECT_ROOT / "profiles"
 MODEL_STATUS_LOADED = "Loaded"
 MODEL_STATUS_ERROR = "Error"
 MODEL_STATUS_SIMULATION = "Simulation"
+MODEL_STATUS_DISABLED = "Disabled"
+INSPECTION_RESULT_CAMERA_ONLY = "CAMERA_ONLY"
+INSPECTION_RESULT_INFERENCE_DISABLED = "INFERENCE_DISABLED"
 CAMERA_BACKEND_AUTO = "auto"
 CAMERA_BACKEND_PICAMERA2 = "picamera2"
 CAMERA_BACKEND_OPENCV = "opencv"
@@ -471,10 +475,26 @@ DASHBOARD_HTML = """
       if (result === "PASS") {
         return "ok";
       }
-      if (result === "NO_PART" || result === "LOW_CONFIDENCE" || result === "SIMULATION") {
+      if (
+        result === "NO_PART" ||
+        result === "LOW_CONFIDENCE" ||
+        result === "SIMULATION" ||
+        result === "CAMERA_ONLY" ||
+        result === "INFERENCE_DISABLED"
+      ) {
         return "warn";
       }
       return "bad";
+    }
+
+    function resultDisplay(result) {
+      if (result === "CAMERA_ONLY") {
+        return "CAMERA ONLY MODE";
+      }
+      if (result === "INFERENCE_DISABLED") {
+        return "INFERENCE DISABLED";
+      }
+      return result || "--";
     }
 
     function refreshSnapshot() {
@@ -513,14 +533,18 @@ DASHBOARD_HTML = """
         setText("camera-status", cameraStatus);
         setBoxState("camera-box", cameraState(cameraStatus));
 
-        setText("stable-status", inspectionResult);
+        setText("stable-status", resultDisplay(inspectionResult));
         setBoxState("stable-box", resultState(inspectionResult));
 
         setText("raw-status", "Raw: " + yesNo(rawDetected));
         setBadgeState("raw-status", rawDetected);
 
         setText("class-name", latest.active_class || latest.class_name || "--");
-        setText("model-status", latest.model_status || status.model_status || "--");
+        var modelText = latest.model_status || status.model_status || "--";
+        if (status.inference_disabled || (status.model && status.model.inference_disabled)) {
+          modelText = "Disabled";
+        }
+        setText("model-status", modelText);
         setText("confidence", formatConfidence(latest.confidence));
         setText("result-message", latest.result_message || "--");
         setText("timestamp", latest.timestamp || "--");
@@ -537,7 +561,7 @@ DASHBOARD_HTML = """
           countValue(status.no_detection_count) + " none"
         );
         setText("snapshot-mode", status.snapshot_enabled ? "Debug On" : "Off");
-        setText("runtime-mode", status.simulation_mode ? "SIMULATION" : "Production");
+        setText("runtime-mode", status.runtime_mode || (status.simulation_mode ? "SIMULATION" : "Production"));
         setText("profile-name", status.profile_name || latest.profile_name || "--");
         setText("model-path", status.model_path || latest.model_path || "--");
         setText("browser-updated", new Date().toLocaleTimeString());
@@ -578,14 +602,17 @@ class RuntimeDetectorService:
         prefer_edge_model=False,
         camera_index=CAMERA_INDEX,
         camera_source=None,
+        camera_profile=None,
         camera_backend=CAMERA_BACKEND_AUTO,
+        camera_only=False,
+        disable_inference=False,
         dry_run=False,
         confidence=None,
         detection_required_frames=3,
         miss_required_frames=3,
         imgsz=DEFAULT_IMGSZ,
-        frame_width=DEFAULT_FRAME_WIDTH,
-        frame_height=DEFAULT_FRAME_HEIGHT,
+        frame_width=None,
+        frame_height=None,
         inference_interval_ms=DEFAULT_INFERENCE_INTERVAL_MS,
         snapshot_interval_ms=DEFAULT_SNAPSHOT_INTERVAL_MS,
         enable_snapshot=False,
@@ -597,13 +624,40 @@ class RuntimeDetectorService:
         self.model_format_requested = model_format or MODEL_FORMAT_AUTO
         self.prefer_edge_model = bool(prefer_edge_model)
         self.camera_source = str(camera_source) if camera_source else ""
-        self.camera_backend_requested = camera_backend or CAMERA_BACKEND_AUTO
+        self.camera_profile_name = str(camera_profile or "")
+        self.camera_profile = self._load_camera_profile(camera_profile)
+        self.camera_profile_error = ""
+        profile_backend = self.camera_profile.backend if self.camera_profile else CAMERA_BACKEND_AUTO
+        requested_backend = camera_backend or CAMERA_BACKEND_AUTO
+        if requested_backend == CAMERA_BACKEND_AUTO and profile_backend != CAMERA_BACKEND_AUTO:
+            requested_backend = profile_backend
+        self.camera_backend_requested = requested_backend
+        self.camera_only = bool(camera_only)
+        self.disable_inference = bool(disable_inference)
+        self.inference_disabled = self.camera_only or self.disable_inference
         self.dry_run = bool(dry_run)
         self.simulation_mode = self.dry_run or bool(self.camera_source)
-        self.runtime_mode = "SIMULATION" if self.simulation_mode else "PRODUCTION"
+        if self.camera_only:
+            self.runtime_mode = "CAMERA_ONLY"
+        elif self.disable_inference:
+            self.runtime_mode = "INFERENCE_DISABLED"
+        elif self.simulation_mode:
+            self.runtime_mode = "SIMULATION"
+        else:
+            self.runtime_mode = "PRODUCTION"
         self.model_status = MODEL_STATUS_LOADED
         self.model_error = ""
-        if self.dry_run:
+        if self.inference_disabled:
+            (
+                self.model_path,
+                self.model_format,
+                self.model_warning,
+                self.profile_config,
+                self.classes,
+            ) = self._resolve_inference_disabled_profile(profile_name, model_path)
+            self.model_status = MODEL_STATUS_DISABLED
+            self.model_error = "Inference disabled"
+        elif self.dry_run:
             (
                 self.model_path,
                 self.model_format,
@@ -640,8 +694,14 @@ class RuntimeDetectorService:
             miss_required_frames=miss_required_frames,
         )
         self.imgsz = max(1, int(imgsz))
-        self.frame_width = max(1, int(frame_width))
-        self.frame_height = max(1, int(frame_height))
+        self.frame_width = max(
+            1,
+            int(frame_width or (self.camera_profile.width if self.camera_profile else DEFAULT_FRAME_WIDTH)),
+        )
+        self.frame_height = max(
+            1,
+            int(frame_height or (self.camera_profile.height if self.camera_profile else DEFAULT_FRAME_HEIGHT)),
+        )
         self.inference_interval_ms = max(0, int(inference_interval_ms))
         self.snapshot_interval_ms = max(0, int(snapshot_interval_ms))
         self.enable_snapshot = bool(enable_snapshot)
@@ -653,7 +713,11 @@ class RuntimeDetectorService:
         self.snapshot_interval_seconds = max(0.0, self.snapshot_interval_ms / 1000)
 
         self.model = None
-        if not self.dry_run and self.model_status != MODEL_STATUS_ERROR:
+        if (
+            not self.inference_disabled
+            and not self.dry_run
+            and self.model_status != MODEL_STATUS_ERROR
+        ):
             try:
                 self.model = self._load_yolo_model()
             except Exception as exc:
@@ -727,6 +791,7 @@ class RuntimeDetectorService:
             return Picamera2CameraManager(
                 frame_width=self.frame_width,
                 frame_height=self.frame_height,
+                target_fps=self.camera_profile.fps if self.camera_profile else 30,
             )
 
         if (
@@ -737,6 +802,7 @@ class RuntimeDetectorService:
             return Picamera2CameraManager(
                 frame_width=self.frame_width,
                 frame_height=self.frame_height,
+                target_fps=self.camera_profile.fps if self.camera_profile else 30,
             )
 
         return CameraManager(
@@ -758,8 +824,13 @@ class RuntimeDetectorService:
             "model_warning": self.model_warning,
             "model_status": self.model_status,
             "camera_source": self.camera_source,
+            "camera_profile": self.camera_profile_name,
+            "camera_profile_config": self.camera_profile.to_dict() if self.camera_profile else None,
             "camera_backend_requested": self.camera_backend_requested,
             "camera_backend": getattr(self.camera, "backend", self.camera_backend_requested),
+            "camera_only": self.camera_only,
+            "disable_inference": self.disable_inference,
+            "inference_disabled": self.inference_disabled,
             "dry_run": self.dry_run,
             "simulation_mode": self.simulation_mode,
             "runtime_mode": self.runtime_mode,
@@ -837,8 +908,13 @@ class RuntimeDetectorService:
                 "model_warning": self.model_warning,
                 "model_loaded": model_loaded,
                 "camera_source": self.camera_source,
+                "camera_profile": self.camera_profile_name,
+                "camera_profile_config": self.camera_profile.to_dict() if self.camera_profile else None,
                 "camera_backend": camera_backend,
                 "camera_connected": camera_connected,
+                "camera_only": self.camera_only,
+                "disable_inference": self.disable_inference,
+                "inference_disabled": self.inference_disabled,
                 "dry_run": self.dry_run,
                 "runtime_mode": self.runtime_mode,
                 "simulation_mode": self.simulation_mode,
@@ -884,10 +960,13 @@ class RuntimeDetectorService:
                     "runtime_mode": self.runtime_mode,
                     "simulation_mode": self.simulation_mode,
                     "running": self.running,
+                    "camera_only": self.camera_only,
+                    "inference_disabled": self.inference_disabled,
                 },
                 "camera": {
                     "connected": camera_connected,
                     "backend": camera_backend,
+                    "profile": self.camera_profile_name or None,
                     "width": self.frame_width,
                     "height": self.frame_height,
                     "fps": camera_fps,
@@ -905,6 +984,7 @@ class RuntimeDetectorService:
                     "warning": self.model_warning or None,
                     "error": self.model_error or None,
                     "status": self.model_status,
+                    "inference_disabled": self.inference_disabled,
                 },
                 "inspection": {
                     "result": latest.get("inspection_result"),
@@ -944,9 +1024,31 @@ class RuntimeDetectorService:
                 time.sleep(0.02)
                 continue
 
+            frame = self._apply_camera_profile_transforms(frame)
             self._update_camera_timing()
             with self.lock:
                 self.latest_camera_frame = frame
+
+    def _apply_camera_profile_transforms(self, frame):
+        if not self.camera_profile:
+            return frame
+
+        output = frame
+        if self.camera_profile.rotation == 90:
+            output = cv2.rotate(output, cv2.ROTATE_90_CLOCKWISE)
+        elif self.camera_profile.rotation == 180:
+            output = cv2.rotate(output, cv2.ROTATE_180)
+        elif self.camera_profile.rotation == 270:
+            output = cv2.rotate(output, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        if self.camera_profile.flip_horizontal and self.camera_profile.flip_vertical:
+            output = cv2.flip(output, -1)
+        elif self.camera_profile.flip_horizontal:
+            output = cv2.flip(output, 1)
+        elif self.camera_profile.flip_vertical:
+            output = cv2.flip(output, 0)
+
+        return output
 
     def _inference_loop(self):
         while self.running:
@@ -955,13 +1057,16 @@ class RuntimeDetectorService:
             if frame is None:
                 if self._inference_due():
                     self._mark_inference_started()
-                    detection = self.inspection.update(
-                        [],
-                        (1, 1, 3),
-                        camera_status=self.camera.status,
-                        model_status=self.model_status,
-                        simulation_mode=self.simulation_mode,
-                    )
+                    if self.inference_disabled and self.camera.status == "Connected":
+                        detection = self._disabled_inference_detection()
+                    else:
+                        detection = self.inspection.update(
+                            [],
+                            (1, 1, 3),
+                            camera_status=self.camera.status,
+                            model_status=self.model_status,
+                            simulation_mode=self.simulation_mode,
+                        )
                     output_payload = self.output_manager.handle_detection(
                         active_profile=self.profile_name,
                         detection=detection,
@@ -992,6 +1097,24 @@ class RuntimeDetectorService:
             try:
                 self._mark_inference_started()
                 inference_started = time.perf_counter()
+                if self.inference_disabled:
+                    detections = []
+                    detection = self._disabled_inference_detection()
+                    inference_ms = 0.0
+                    self._maybe_update_snapshot(frame, detections, detection)
+                    self._update_runtime_timing(inference_ms)
+                    output_payload = self.output_manager.handle_detection(
+                        active_profile=self.profile_name,
+                        detection=detection,
+                        camera_status=self.camera.status,
+                        model_status=self.model_status,
+                        simulation_mode=self.simulation_mode,
+                    )
+                    action_result = self._handle_actions(detection, output_payload)
+                    output_payload["action_result"] = action_result
+                    self._update_latest(detection, output_payload)
+                    continue
+
                 if self.dry_run:
                     detections = self._fake_detections(frame)
                 elif self.model_status == MODEL_STATUS_ERROR or self.model is None:
@@ -1078,6 +1201,7 @@ class RuntimeDetectorService:
             "model_format": self.model_format,
             "model_warning": self.model_warning or None,
             "model_error": self.model_error or None,
+            "camera_profile": self.camera_profile_name or None,
             "inspection_result": detection.get("inspection_result", "NO_PART"),
             "pass_fail_bool": detection.get("pass_fail_bool"),
             "active_class": detection.get("active_class") or detection.get("class_name"),
@@ -1102,8 +1226,12 @@ class RuntimeDetectorService:
             "model_format": self.model_format,
             "model_warning": self.model_warning,
             "camera_source": self.camera_source,
+            "camera_profile": self.camera_profile_name,
             "camera_backend": getattr(self.camera, "backend", self.camera_backend_requested),
             "camera_connected": self._camera_connected(),
+            "camera_only": self.camera_only,
+            "disable_inference": self.disable_inference,
+            "inference_disabled": self.inference_disabled,
             "dry_run": self.dry_run,
             "runtime_mode": self.runtime_mode,
             "simulation_mode": self.simulation_mode,
@@ -1357,7 +1485,10 @@ class RuntimeDetectorService:
             self.latest_snapshot_at = datetime.now().isoformat(timespec="seconds")
 
     def _empty_detection(self):
-        detection = self.inspection.snapshot()
+        if self.inference_disabled:
+            detection = self._disabled_inference_detection()
+        else:
+            detection = self.inspection.snapshot()
         detection.update(
             {
                 "timestamp": None,
@@ -1368,8 +1499,12 @@ class RuntimeDetectorService:
                 "model_format": self.model_format,
                 "model_warning": self.model_warning,
                 "camera_source": self.camera_source,
+                "camera_profile": self.camera_profile_name,
                 "camera_backend": getattr(self.camera, "backend", self.camera_backend_requested),
                 "camera_connected": self._camera_connected(),
+                "camera_only": self.camera_only,
+                "disable_inference": self.disable_inference,
+                "inference_disabled": self.inference_disabled,
                 "dry_run": self.dry_run,
                 "runtime_mode": self.runtime_mode,
                 "simulation_mode": self.simulation_mode,
@@ -1385,6 +1520,41 @@ class RuntimeDetectorService:
             simulation_mode=self.simulation_mode,
         )
         return detection
+
+    def _disabled_inference_detection(self):
+        if self.camera_only:
+            result = INSPECTION_RESULT_CAMERA_ONLY
+            message = "Camera-only mode active. Inference disabled."
+        else:
+            result = INSPECTION_RESULT_INFERENCE_DISABLED
+            message = "Inference disabled."
+
+        return {
+            "inspection_result": result,
+            "pass_fail_bool": None,
+            "result_message": message,
+            "stable_detected": False,
+            "raw_detected": False,
+            "class_name": None,
+            "active_class": None,
+            "confidence": None,
+            "stable_detection_count": 0,
+            "detection_frame_count": 0,
+            "miss_frame_count": 0,
+            "target_classes": sorted(self.target_classes),
+            "acceptable_classes": sorted(self.inspection.acceptable_classes),
+            "reject_classes": sorted(self.inspection.reject_classes),
+            "minimum_confidence": self.inspection.minimum_confidence,
+            "allow_simulation": self.inspection.allow_simulation,
+            "roi_enabled": self.inspection.roi_enabled,
+            "roi": {
+                "x1": self.inspection.roi_x1,
+                "y1": self.inspection.roi_y1,
+                "x2": self.inspection.roi_x2,
+                "y2": self.inspection.roi_y2,
+            },
+            "saved_image_path": "",
+        }
 
     def _fake_detections(self, frame):
         self.dry_run_inference_count += 1
@@ -1481,6 +1651,18 @@ class RuntimeDetectorService:
         target_classes = self.profile_config.get("target_classes") or self.classes
         return {normalize_class_name(name) for name in target_classes if str(name).strip()}
 
+    @staticmethod
+    def _load_camera_profile(camera_profile):
+        if not camera_profile:
+            return None
+
+        try:
+            return load_camera_profile(camera_profile)
+        except CameraProfileError:
+            raise
+        except Exception as exc:
+            raise CameraProfileError(f"Could not load camera profile '{camera_profile}': {exc}") from exc
+
     def _load_confidence(self, override):
         if override is not None:
             return float(override)
@@ -1506,6 +1688,7 @@ class RuntimeDetectorService:
             raise ProfileConfigError(
                 f"Invalid inspection config for profile '{self.profile_name}': roi must be an object."
             )
+        camera_roi = self.camera_profile.roi if self.camera_profile else None
 
         acceptable_classes = (
             inspection_config.get("acceptable_classes")
@@ -1550,12 +1733,42 @@ class RuntimeDetectorService:
                     "allowed_no_detection_frames",
                 ),
                 "roi_enabled": self._as_bool(
-                    roi_config.get("enabled", roi_config.get("roi_enabled", ROI_ENABLED))
+                    roi_config.get(
+                        "enabled",
+                        roi_config.get(
+                            "roi_enabled",
+                            camera_roi.enabled if camera_roi is not None else ROI_ENABLED,
+                        ),
+                    )
                 ),
-                "roi_x1": self._as_float(roi_config.get("x1", roi_config.get("roi_x1", ROI_X1)), "roi.x1"),
-                "roi_y1": self._as_float(roi_config.get("y1", roi_config.get("roi_y1", ROI_Y1)), "roi.y1"),
-                "roi_x2": self._as_float(roi_config.get("x2", roi_config.get("roi_x2", ROI_X2)), "roi.x2"),
-                "roi_y2": self._as_float(roi_config.get("y2", roi_config.get("roi_y2", ROI_Y2)), "roi.y2"),
+                "roi_x1": self._as_float(
+                    roi_config.get(
+                        "x1",
+                        roi_config.get("roi_x1", camera_roi.x1 if camera_roi is not None else ROI_X1),
+                    ),
+                    "roi.x1",
+                ),
+                "roi_y1": self._as_float(
+                    roi_config.get(
+                        "y1",
+                        roi_config.get("roi_y1", camera_roi.y1 if camera_roi is not None else ROI_Y1),
+                    ),
+                    "roi.y1",
+                ),
+                "roi_x2": self._as_float(
+                    roi_config.get(
+                        "x2",
+                        roi_config.get("roi_x2", camera_roi.x2 if camera_roi is not None else ROI_X2),
+                    ),
+                    "roi.x2",
+                ),
+                "roi_y2": self._as_float(
+                    roi_config.get(
+                        "y2",
+                        roi_config.get("roi_y2", camera_roi.y2 if camera_roi is not None else ROI_Y2),
+                    ),
+                    "roi.y2",
+                ),
                 "allow_simulation": self._as_bool(inspection_config.get("allow_simulation", True)),
             }
         except (TypeError, ValueError) as exc:
@@ -1630,6 +1843,26 @@ class RuntimeDetectorService:
                 path = PROJECT_ROOT / path
         else:
             path = profile_dir / "MODEL_ERROR"
+
+        return path, self.model_format_requested, "", config, classes
+
+    def _resolve_inference_disabled_profile(self, profile_name, model_path):
+        profile_dir = MODELS_DIR / profile_name
+        config = self._load_profile_config(profile_dir) if profile_dir.exists() else {}
+        classes = self._load_classes(profile_dir) if profile_dir.exists() else []
+
+        if not classes:
+            classes = ["camera_only"]
+        if not config.get("target_classes"):
+            config["target_classes"] = [classes[0]]
+        config.setdefault("confidence", DEFAULT_CONFIDENCE)
+
+        if model_path:
+            path = Path(model_path)
+            if not path.is_absolute():
+                path = PROJECT_ROOT / path
+        else:
+            path = profile_dir / "INFERENCE_DISABLED"
 
         return path, self.model_format_requested, "", config, classes
 
@@ -1798,6 +2031,23 @@ def main():
         ),
     )
     parser.add_argument(
+        "--camera-profile",
+        default=os.getenv("VISION_CAMERA_PROFILE"),
+        help="Camera profile name from cameras/ or path to a camera YAML profile.",
+    )
+    parser.add_argument(
+        "--camera-only",
+        action="store_true",
+        default=os.getenv("VISION_CAMERA_ONLY", "").lower() in {"1", "true", "yes", "on"},
+        help="Start camera, dashboard, API, and optional snapshots without loading or running inference.",
+    )
+    parser.add_argument(
+        "--disable-inference",
+        action="store_true",
+        default=os.getenv("VISION_DISABLE_INFERENCE", "").lower() in {"1", "true", "yes", "on"},
+        help="Keep runtime structure alive but skip model loading and prediction.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=os.getenv("VISION_DRY_RUN", "").lower() in {"1", "true", "yes", "on"},
@@ -1818,12 +2068,12 @@ def main():
     parser.add_argument(
         "--frame-width",
         type=int,
-        default=int(os.getenv("VISION_FRAME_WIDTH", DEFAULT_FRAME_WIDTH)),
+        default=int(os.getenv("VISION_FRAME_WIDTH")) if os.getenv("VISION_FRAME_WIDTH") else None,
     )
     parser.add_argument(
         "--frame-height",
         type=int,
-        default=int(os.getenv("VISION_FRAME_HEIGHT", DEFAULT_FRAME_HEIGHT)),
+        default=int(os.getenv("VISION_FRAME_HEIGHT")) if os.getenv("VISION_FRAME_HEIGHT") else None,
     )
     parser.add_argument(
         "--inference-interval-ms",
@@ -1873,7 +2123,10 @@ def main():
             prefer_edge_model=args.prefer_edge_model,
             camera_index=args.camera,
             camera_source=args.camera_source,
+            camera_profile=args.camera_profile,
             camera_backend=args.camera_backend,
+            camera_only=args.camera_only,
+            disable_inference=args.disable_inference,
             dry_run=args.dry_run,
             confidence=confidence,
             detection_required_frames=args.detection_required_frames,

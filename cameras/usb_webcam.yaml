@@ -1,0 +1,23 @@
+name: usb_webcam
+backend: opencv
+width: 640
+height: 480
+fps: 30
+rotation: 0
+flip_horizontal: false
+flip_vertical: false
+exposure_mode: auto
+exposure_time: null
+gain: null
+white_balance: auto
+roi:
+  enabled: false
+  x1: 0.0
+  y1: 0.0
+  x2: 1.0
+  y2: 1.0
+preprocessing:
+  enabled: true
+  brightness_check: true
+  blur_check: true
+  color_normalization: false

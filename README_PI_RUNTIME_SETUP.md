@@ -71,11 +71,19 @@ Override defaults with environment variables:
 PROFILE=yellow_daifuku IMGSZ=320 scripts/run_pi_runtime.sh
 ```
 
+Camera profile defaults can also be selected:
+
+```bash
+CAMERA_PROFILE=pi_camera3 scripts/run_pi_runtime.sh
+CAMERA_PROFILE=usb_webcam CAMERA_BACKEND=opencv scripts/run_pi_runtime.sh
+```
+
 The default command is equivalent to:
 
 ```bash
 python -m app.runtime.detector_service \
   --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
   --camera-backend picamera2 \
   --prefer-edge-model \
   --model-format auto \
@@ -116,6 +124,42 @@ models/yellow_daifuku/best_ncnn_model/
 ```
 
 The Pi launcher uses `--prefer-edge-model --model-format auto`, so it will prefer `best_ncnn_model/` when present and only fall back to `.pt` if no NCNN export exists. On Raspberry Pi 4, `.pt` inference may fail with `Illegal instruction`; NCNN is the recommended deployment format.
+
+## Camera Profiles And Runtime Modes
+
+Camera profiles live under:
+
+```text
+cameras/pi_camera3.yaml
+cameras/usb_webcam.yaml
+```
+
+They define camera backend, width, height, FPS, orientation, optional ROI defaults, and lightweight preprocessing settings. CLI values such as `--frame-width`, `--frame-height`, and `--camera-backend` can still override profile defaults.
+
+Camera-only dashboard for focus, framing, and camera validation:
+
+```bash
+scripts/run_camera_dashboard.sh
+```
+
+Equivalent command:
+
+```bash
+python -m app.runtime.detector_service \
+  --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
+  --camera-only \
+  --enable-snapshot \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+Runtime modes:
+
+- `camera-only` starts the real camera, dashboard, API, and snapshot endpoint without loading YOLO, PyTorch, or NCNN.
+- `disable-inference` keeps the normal runtime shape alive but intentionally skips model prediction.
+- `dry-run` avoids model loading and uses simulated detections for dashboard/API testing.
+- Real inference should use NCNN on Raspberry Pi and `.pt` on desktop/training machines.
 
 ## Debugging Object Not Detected
 

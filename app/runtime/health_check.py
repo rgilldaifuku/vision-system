@@ -38,6 +38,7 @@ PI_RUNTIME_IMPORTS = {
 RUNTIME_MODULES = (
     "app.runtime.detector_service",
     "app.runtime.camera_manager",
+    "app.runtime.camera_profile",
     "app.runtime.camera_sources",
     "app.runtime.health_check",
     "app.runtime.inspection_logic",
@@ -77,6 +78,7 @@ def create_parser():
     parser.add_argument("--model")
     parser.add_argument("--camera", type=int)
     parser.add_argument("--camera-source")
+    parser.add_argument("--camera-profile")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -108,6 +110,7 @@ def main():
     check_imports(check, args)
     check_pi_package_origins(check, args)
     check_runtime_imports(check)
+    check_camera_profiles(check, args)
     check_runtime_config(check, args)
     check_profile_and_model(check, args)
     check_write_permissions(check)
@@ -179,6 +182,42 @@ def check_runtime_imports(check):
             check.fail(f"Cannot import runtime module {module_name}: {exc}")
         else:
             check.ok(f"Imported runtime module {module_name}")
+
+
+def check_camera_profiles(check, args):
+    try:
+        from app.runtime.camera_profile import available_camera_profiles, load_camera_profile
+    except Exception as exc:
+        check.fail(f"Cannot import camera profile loader: {exc}")
+        return
+
+    profiles = available_camera_profiles()
+    if profiles:
+        check.ok(f"Available camera profiles: {', '.join(profiles)}")
+    else:
+        check.warn("No camera profiles found under cameras/")
+
+    for profile_name in ("pi_camera3", "usb_webcam"):
+        try:
+            profile = load_camera_profile(profile_name)
+        except Exception as exc:
+            check.fail(f"Camera profile '{profile_name}' is invalid: {exc}")
+        else:
+            check.ok(
+                f"Camera profile '{profile_name}' loaded: "
+                f"{profile.backend} {profile.width}x{profile.height}@{profile.fps}"
+            )
+
+    if args.camera_profile:
+        try:
+            profile = load_camera_profile(args.camera_profile)
+        except Exception as exc:
+            check.fail(f"Requested camera profile is invalid: {exc}")
+        else:
+            check.ok(
+                f"Requested camera profile loaded: "
+                f"{profile.name} ({profile.backend} {profile.width}x{profile.height})"
+            )
 
 
 def check_runtime_config(check, args):

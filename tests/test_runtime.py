@@ -15,6 +15,7 @@ import numpy as np
 
 import app.runtime.detector_service as detector_service
 import app.runtime.health_check as health_check
+from app.runtime.camera_profile import CameraProfileError, load_camera_profile
 from app.runtime.action_manager import ActionManager
 from app.runtime.camera_sources import SimulatedCameraSource
 from app.runtime.inspection_logic import InspectionLogic
@@ -462,6 +463,51 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("counters", status)
         self.assertIn("output_payload", status)
 
+    def test_camera_profile_loading_defaults_and_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_path = Path(tmpdir) / "camera.yaml"
+            profile_path.write_text(
+                "name: test_camera\n"
+                "backend: cv2\n"
+                "width: 320\n"
+                "height: 240\n",
+                encoding="utf-8",
+            )
+
+            profile = load_camera_profile(profile_path)
+            self.assertEqual(profile.name, "test_camera")
+            self.assertEqual(profile.backend, "opencv")
+            self.assertEqual(profile.width, 320)
+            self.assertEqual(profile.height, 240)
+            self.assertEqual(profile.fps, 30)
+            self.assertFalse(profile.roi.enabled)
+            self.assertTrue(profile.preprocessing.brightness_check)
+
+    def test_missing_camera_profile_has_clear_error(self):
+        with self.assertRaisesRegex(CameraProfileError, "Camera profile not found"):
+            load_camera_profile("does_not_exist")
+
+    def test_camera_only_status_does_not_load_inference(self):
+        with mock.patch.object(
+            detector_service,
+            "InferenceEngine",
+            side_effect=AssertionError("Inference should not load"),
+        ):
+            service = detector_service.RuntimeDetectorService(
+                profile_name="missing_profile",
+                camera_only=True,
+            )
+            status = service.get_status()
+
+        self.assertEqual(status["runtime_mode"], "CAMERA_ONLY")
+        self.assertTrue(status["camera_only"])
+        self.assertTrue(status["inference_disabled"])
+        self.assertFalse(status["model_loaded"])
+        self.assertEqual(status["model_status"], "Disabled")
+        self.assertEqual(status["inspection_result"], "CAMERA_ONLY")
+        self.assertEqual(status["inspection"]["result"], "CAMERA_ONLY")
+        self.assertEqual(status["model"]["error"], "Inference disabled")
+
     def test_health_check_mode_parsing(self):
         parser = health_check.create_parser()
         laptop_args = parser.parse_args(["--mode", "laptop", "--profile", "yellow_daifuku"])
@@ -477,6 +523,16 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(laptop_args.mode, "laptop")
         self.assertEqual(pi_args.mode, "pi")
         self.assertEqual(pi_args.camera_backend, "picamera2")
+
+    def test_runtime_cli_accepts_camera_mode_arguments(self):
+        help_result = subprocess.run(
+            [sys.executable, "-m", "app.runtime.detector_service", "--help"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        for argument in ("--camera-profile", "--camera-only", "--disable-inference"):
+            self.assertIn(argument, help_result.stdout)
 
     def test_picamera2_manager_missing_package_is_safe(self):
         with mock.patch.object(
@@ -777,8 +833,10 @@ class RuntimeTests(unittest.TestCase):
             "--inference-interval-ms",
             "--camera-source",
             "--dry-run",
+            "--camera-profile",
+            "--camera-only",
+            "--disable-inference",
         ):
-            self.assertIn(argument, readme)
             self.assertIn(argument, help_result.stdout)
 
         self.assertIn("python -m app.runtime.health_check", readme)
