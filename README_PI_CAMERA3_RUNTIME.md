@@ -78,12 +78,30 @@ Direct runtime camera-manager smoke test:
 python scripts/test_picamera2_manager.py
 ```
 
+## NCNN Runtime Model
+
+Keep `.pt` files for desktop training/testing. For Raspberry Pi 4 runtime, export NCNN on the desktop and copy the exported folder to the Pi:
+
+```bash
+python scripts/export_profile_to_ncnn.py --profile yellow_daifuku --imgsz 320
+```
+
+Expected Pi folder:
+
+```text
+models/yellow_daifuku/best_ncnn_model/
+```
+
+The Pi runtime launcher prefers this folder automatically. If only `best.pt` exists, the Pi may crash during inference with `Illegal instruction`.
+
 ## Runtime Command
 
 ```bash
 python -m app.runtime.detector_service \
   --profile yellow_daifuku \
   --camera-backend picamera2 \
+  --prefer-edge-model \
+  --model-format auto \
   --host 0.0.0.0 \
   --port 8000 \
   --imgsz 256 \

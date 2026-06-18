@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import platform
+import signal
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -11,23 +13,37 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import cv2
 import yaml
-from ultralytics import YOLO
 
 from app.config import DATA_DIR, MODELS_DIR
+from app.runtime.inference_engine import (
+    InferenceEngine,
+    MODEL_FORMAT_AUTO,
+    MODEL_FORMAT_NCNN,
+    MODEL_FORMAT_PT,
+    resolve_model_path,
+)
+from app.runtime.inspection_logic import normalize_class_name
 
 
 def main():
+    install_sigill_message()
+
     parser = argparse.ArgumentParser(description="Run one YOLO model/profile on one image.")
     parser.add_argument("--profile", default="yellow_daifuku")
     parser.add_argument("--image", required=True)
     parser.add_argument("--imgsz", type=int, default=320)
     parser.add_argument("--conf", type=float, default=0.10)
     parser.add_argument("--model")
+    parser.add_argument(
+        "--model-format",
+        choices=(MODEL_FORMAT_AUTO, MODEL_FORMAT_PT, MODEL_FORMAT_NCNN),
+        default=MODEL_FORMAT_AUTO,
+    )
+    parser.add_argument("--prefer-edge-model", action="store_true")
     parser.add_argument("--output-dir", default=str(DATA_DIR / "debug_frames" / "model_tests"))
     args = parser.parse_args()
 
     profile_dir = MODELS_DIR / args.profile
-    model_path = resolve_model_path(profile_dir, args.model)
     classes = load_classes(profile_dir)
     profile_config = load_profile_config(profile_dir)
     expected_classes = (
@@ -39,24 +55,43 @@ def main():
     image_path = Path(args.image)
     if not image_path.exists():
         raise SystemExit(f"Image does not exist: {image_path}")
-    if not model_path.exists():
-        raise SystemExit(f"Model does not exist: {model_path}")
 
-    model = YOLO(str(model_path))
+    model_path, model_format, warning = resolve_model_path(
+        profile_dir,
+        config=profile_config,
+        model_override=args.model,
+        model_format=args.model_format,
+        prefer_edge_model=args.prefer_edge_model,
+    )
+
     print(f"Profile: {args.profile}")
-    print(f"Model: {model_path}")
+    print(f"Selected model: {model_path}")
+    print(f"Selected model format: {model_format}")
+    print(f"Model path exists: {model_path.exists()}")
     print(f"Image: {image_path}")
     print(f"classes.txt: {classes}")
     print(f"expected profile classes: {expected_classes}")
-    print(f"model names: {model.names}")
+    if warning:
+        print(f"WARNING: {warning}")
+    if is_pi_like() and model_format == MODEL_FORMAT_PT:
+        print(
+            "WARNING: PyTorch .pt inference is not recommended on Raspberry Pi. "
+            "If this exits with Illegal instruction, export NCNN on desktop and deploy the NCNN folder."
+        )
 
-    results = model.predict(str(image_path), imgsz=args.imgsz, conf=args.conf, verbose=False)
-    detections = extract_detections(results)
+    if not model_path.exists():
+        print_export_instructions(args.profile)
+        raise SystemExit(1)
+
+    engine = InferenceEngine(model_path, model_format)
+    print(f"model names: {engine.names}")
+
+    results, detections = engine.predict(read_image(image_path), confidence=args.conf, imgsz=args.imgsz)
     print(json.dumps(detections, indent=2, sort_keys=True))
 
-    model_class_names = {str(name) for name in model.names.values()}
+    model_class_names = {normalize_class_name(name) for name in engine.names.values()}
     for expected in expected_classes:
-        if expected not in model_class_names:
+        if normalize_class_name(expected) not in model_class_names:
             print(f"WARNING: expected class '{expected}' not present in model.names")
 
     output_dir = Path(args.output_dir)
@@ -67,22 +102,35 @@ def main():
     print(f"Annotated image: {output_path}")
 
 
-def resolve_model_path(profile_dir, model_override=None):
-    if model_override:
-        path = Path(model_override)
-        return path if path.is_absolute() else PROJECT_ROOT / path
+def install_sigill_message():
+    if not hasattr(signal, "SIGILL"):
+        return
 
-    config_path = profile_dir / "config.json"
-    if config_path.exists():
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        configured_model = config.get("model_file")
-        if configured_model:
-            return profile_dir / configured_model
+    def handler(signum, frame):
+        print(
+            "\nPyTorch .pt inference is not supported on this Raspberry Pi environment. "
+            "Export to NCNN on desktop and deploy the NCNN folder.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(132)
 
-    latest_model = profile_dir / "latest" / "best.pt"
-    if latest_model.exists():
-        return latest_model
-    return profile_dir / "best.pt"
+    try:
+        signal.signal(signal.SIGILL, handler)
+    except Exception:
+        pass
+
+
+def is_pi_like():
+    machine = platform.machine().lower()
+    return machine.startswith("arm") or machine in {"aarch64", "arm64"}
+
+
+def read_image(path):
+    image = cv2.imread(str(path))
+    if image is None:
+        raise SystemExit(f"Could not read image: {path}")
+    return image
 
 
 def load_classes(profile_dir):
@@ -119,20 +167,12 @@ def deep_merge(base, override):
     return merged
 
 
-def extract_detections(results):
-    detections = []
-    for result in results:
-        for box in result.boxes:
-            class_id = int(box.cls[0])
-            detections.append(
-                {
-                    "class_id": class_id,
-                    "class_name": result.names.get(class_id, str(class_id)),
-                    "confidence": float(box.conf[0]),
-                    "bbox": box.xyxy[0].cpu().numpy().tolist(),
-                }
-            )
-    return detections
+def print_export_instructions(profile):
+    print("No usable model was found.")
+    print("Export on desktop:")
+    print(f"  yolo export model=models/{profile}/best.pt format=ncnn imgsz=320")
+    print("Then copy:")
+    print(f"  models/{profile}/best_ncnn_model/ to the Pi")
 
 
 if __name__ == "__main__":

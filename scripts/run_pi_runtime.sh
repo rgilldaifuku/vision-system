@@ -13,6 +13,7 @@ FRAME_WIDTH="${FRAME_WIDTH:-640}"
 FRAME_HEIGHT="${FRAME_HEIGHT:-480}"
 INTERVAL_MS="${INTERVAL_MS:-300}"
 CAMERA_BACKEND="${CAMERA_BACKEND:-picamera2}"
+MODEL_FORMAT="${MODEL_FORMAT:-auto}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 if [ ! -f "$VENV_DIR/bin/activate" ]; then
@@ -36,4 +37,6 @@ python -m app.runtime.detector_service \
   --frame-width "$FRAME_WIDTH" \
   --frame-height "$FRAME_HEIGHT" \
   --inference-interval-ms "$INTERVAL_MS" \
+  --prefer-edge-model \
+  --model-format "$MODEL_FORMAT" \
   $EXTRA_ARGS

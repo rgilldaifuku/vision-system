@@ -164,6 +164,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["inspection_result"], "PASS")
         self.assertTrue(snapshot["pass_fail_bool"])
 
+    def test_class_name_normalization_matches_spaces_and_underscores(self):
+        logic = InspectionLogic(
+            acceptable_classes=["yellow_daifuku"],
+            minimum_confidence=0.7,
+            detection_required_frames=1,
+            miss_required_frames=1,
+        )
+        detection = {"class_name": "yellow daifuku", "confidence": 0.91, "bbox": [0, 0, 10, 10]}
+        snapshot = logic.update([detection], (20, 20, 3))
+        self.assertEqual(snapshot["inspection_result"], "PASS")
+        self.assertEqual(snapshot["class_name"], "yellow daifuku")
+
     def test_reject_class_produces_fail(self):
         logic = InspectionLogic(
             acceptable_classes=["good"],
@@ -289,7 +301,7 @@ class RuntimeTests(unittest.TestCase):
 
             with (
                 mock.patch.object(detector_service, "MODELS_DIR", Path(tmpdir)),
-                mock.patch.object(detector_service, "YOLO", lambda path: object()),
+                mock.patch.object(detector_service, "InferenceEngine", lambda path, model_format="auto": object()),
                 mock.patch.object(detector_service.Picamera2CameraManager, "is_available", return_value=True),
             ):
                 explicit_camera = detector_service.RuntimeDetectorService(
@@ -306,6 +318,27 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(explicit_camera.camera.backend, "opencv")
             self.assertEqual(auto_camera.camera.backend, "picamera2")
 
+    def test_prefer_edge_model_selects_ncnn_folder(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_dir = create_profile(Path(tmpdir))
+            ncnn_dir = profile_dir / "best_ncnn_model"
+            ncnn_dir.mkdir()
+            (ncnn_dir / "model.ncnn.param").write_text("param", encoding="utf-8")
+            (ncnn_dir / "model.ncnn.bin").write_bytes(b"bin")
+
+            with (
+                mock.patch.object(detector_service, "MODELS_DIR", Path(tmpdir)),
+                mock.patch.object(detector_service, "InferenceEngine", lambda path, model_format="auto": object()),
+            ):
+                service = detector_service.RuntimeDetectorService(
+                    profile_name="test_profile",
+                    prefer_edge_model=True,
+                    model_format="auto",
+                )
+
+            self.assertEqual(service.model_path, ncnn_dir)
+            self.assertEqual(service.model_format, "ncnn")
+
     def test_invalid_profile_config_raises_readable_error(self):
         with tempfile.TemporaryDirectory() as models_tmp, tempfile.TemporaryDirectory() as profiles_tmp:
             create_profile(Path(models_tmp))
@@ -319,7 +352,7 @@ class RuntimeTests(unittest.TestCase):
             with (
                 mock.patch.object(detector_service, "MODELS_DIR", Path(models_tmp)),
                 mock.patch.object(detector_service, "PROFILE_CONFIGS_DIR", Path(profiles_tmp)),
-                mock.patch.object(detector_service, "YOLO", lambda path: object()),
+                mock.patch.object(detector_service, "InferenceEngine", lambda path, model_format="auto": object()),
             ):
                 with self.assertRaisesRegex(detector_service.ProfileConfigError, "minimum_confidence"):
                     detector_service.RuntimeDetectorService(profile_name="test_profile")
@@ -365,7 +398,7 @@ class RuntimeTests(unittest.TestCase):
             create_profile(Path(tmpdir))
             with (
                 mock.patch.object(detector_service, "MODELS_DIR", Path(tmpdir)),
-                mock.patch.object(detector_service, "YOLO", lambda path: object()),
+                mock.patch.object(detector_service, "InferenceEngine", lambda path, model_format="auto": object()),
             ):
                 service = detector_service.RuntimeDetectorService(
                     profile_name="test_profile",
@@ -643,7 +676,7 @@ class RuntimeTests(unittest.TestCase):
             with (
                 mock.patch.object(detector_service, "MODELS_DIR", Path(models_tmp)),
                 mock.patch.object(detector_service, "PROFILE_CONFIGS_DIR", Path(profiles_tmp)),
-                mock.patch.object(detector_service, "YOLO", lambda path: object()),
+                mock.patch.object(detector_service, "InferenceEngine", lambda path, model_format="auto": object()),
             ):
                 service = detector_service.RuntimeDetectorService(profile_name="test_profile")
 
@@ -661,7 +694,7 @@ class RuntimeTests(unittest.TestCase):
             with (
                 mock.patch.object(detector_service, "MODELS_DIR", Path(models_tmp)),
                 mock.patch.object(detector_service, "REVIEW_IMAGES_DIR", Path(review_tmp)),
-                mock.patch.object(detector_service, "YOLO", lambda path: object()),
+                mock.patch.object(detector_service, "InferenceEngine", lambda path, model_format="auto": object()),
             ):
                 service = detector_service.RuntimeDetectorService(profile_name="test_profile")
 

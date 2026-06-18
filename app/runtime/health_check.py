@@ -41,6 +41,7 @@ RUNTIME_MODULES = (
     "app.runtime.camera_sources",
     "app.runtime.health_check",
     "app.runtime.inspection_logic",
+    "app.runtime.inference_engine",
     "app.runtime.output_manager",
     "app.runtime.action_manager",
     "app.runtime.picamera2_manager",
@@ -205,6 +206,8 @@ def check_runtime_config(check, args):
 
 
 def check_profile_and_model(check, args):
+    from app.runtime.inference_engine import find_ncnn_model
+
     profile_dir = MODELS_DIR / args.profile
     if not profile_dir.exists():
         if args.dry_run:
@@ -248,6 +251,15 @@ def check_profile_and_model(check, args):
         check.warn(f"Model file does not exist, but dry-run is enabled: {model_path}")
     else:
         check.fail(f"Model file does not exist: {model_path}")
+
+    ncnn_model = find_ncnn_model(profile_dir)
+    if ncnn_model:
+        check.ok(f"NCNN edge model exists: {ncnn_model}")
+    elif args.mode == "pi":
+        check.warn(
+            "Only .pt/no edge model found. On Raspberry Pi 4, .pt inference may fail "
+            "with Illegal instruction. Export NCNN on desktop for runtime."
+        )
 
     check_runtime_profile_rules(check, args.profile)
 

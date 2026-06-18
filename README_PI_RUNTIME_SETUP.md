@@ -77,6 +77,8 @@ The default command is equivalent to:
 python -m app.runtime.detector_service \
   --profile yellow_daifuku \
   --camera-backend picamera2 \
+  --prefer-edge-model \
+  --model-format auto \
   --host 0.0.0.0 \
   --port 8000 \
   --imgsz 256 \
@@ -84,6 +86,36 @@ python -m app.runtime.detector_service \
   --frame-height 480 \
   --inference-interval-ms 300
 ```
+
+## Model Format On Raspberry Pi
+
+Desktop/training should keep using `.pt` model files. Raspberry Pi runtime should use an exported NCNN model when possible.
+
+Expected profile layout:
+
+```text
+models/yellow_daifuku/
+  best.pt
+  classes.txt
+  config.json
+  best_ncnn_model/
+    model.ncnn.param
+    model.ncnn.bin
+```
+
+Export NCNN on the desktop/work computer, not on the Pi:
+
+```bash
+python scripts/export_profile_to_ncnn.py --profile yellow_daifuku --imgsz 320
+```
+
+Then copy this folder to the Pi:
+
+```text
+models/yellow_daifuku/best_ncnn_model/
+```
+
+The Pi launcher uses `--prefer-edge-model --model-format auto`, so it will prefer `best_ncnn_model/` when present and only fall back to `.pt` if no NCNN export exists. On Raspberry Pi 4, `.pt` inference may fail with `Illegal instruction`; NCNN is the recommended deployment format.
 
 ## Debugging Object Not Detected
 
@@ -108,7 +140,9 @@ python scripts/test_model_on_image.py \
   --profile yellow_daifuku \
   --image data/debug_frames/manual/<image>.jpg \
   --imgsz 320 \
-  --conf 0.10
+  --conf 0.10 \
+  --prefer-edge-model \
+  --model-format auto
 ```
 
 This prints raw detections, model class names, profile classes, and writes an annotated image under `data/debug_frames/model_tests/`.

@@ -4,6 +4,8 @@ set -euo pipefail
 # Raspberry Pi runtime installer for Picamera2 + YOLO inference.
 # This intentionally does NOT install the desktop/training requirements file.
 # NumPy/OpenCV/Picamera2 should come from Raspberry Pi OS apt packages.
+# Export NCNN models on the desktop/work computer and copy best_ncnn_model/
+# to the Pi. This installer does not export models on the Pi.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${VISION_PROJECT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"

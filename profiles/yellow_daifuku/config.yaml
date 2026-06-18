@@ -2,6 +2,7 @@ profile_name: yellow_daifuku
 inspection:
   acceptable_classes:
     - yellow_daifuku
+    - yellow daifuku
   reject_classes: []
   minimum_confidence: 0.35
   required_consecutive_detections: 3

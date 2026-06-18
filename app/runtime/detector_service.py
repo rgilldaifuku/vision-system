@@ -11,14 +11,6 @@ import cv2
 import yaml
 from flask import Flask, Response, jsonify
 
-try:
-    from ultralytics import YOLO
-except Exception as exc:
-    YOLO = None
-    YOLO_IMPORT_ERROR = exc
-else:
-    YOLO_IMPORT_ERROR = None
-
 from app.config import (
     ACTIVE_MODEL_PROFILE,
     CAMERA_INDEX,
@@ -36,7 +28,14 @@ from app.config import (
 )
 from app.runtime.camera_manager import CameraManager
 from app.runtime.camera_sources import SimulatedCameraSource
-from app.runtime.inspection_logic import InspectionLogic
+from app.runtime.inference_engine import (
+    InferenceEngine,
+    MODEL_FORMAT_AUTO,
+    MODEL_FORMAT_NCNN,
+    MODEL_FORMAT_PT,
+    resolve_model_path,
+)
+from app.runtime.inspection_logic import InspectionLogic, normalize_class_name
 from app.runtime.action_manager import ActionManager
 from app.runtime.output_manager import OutputManager
 from app.runtime.picamera2_manager import Picamera2CameraManager
@@ -575,6 +574,8 @@ class RuntimeDetectorService:
         self,
         profile_name=ACTIVE_MODEL_PROFILE,
         model_path=None,
+        model_format=MODEL_FORMAT_AUTO,
+        prefer_edge_model=False,
         camera_index=CAMERA_INDEX,
         camera_source=None,
         camera_backend=CAMERA_BACKEND_AUTO,
@@ -593,6 +594,8 @@ class RuntimeDetectorService:
         debug_frame_limit=20,
     ):
         self.profile_name = profile_name
+        self.model_format_requested = model_format or MODEL_FORMAT_AUTO
+        self.prefer_edge_model = bool(prefer_edge_model)
         self.camera_source = str(camera_source) if camera_source else ""
         self.camera_backend_requested = camera_backend or CAMERA_BACKEND_AUTO
         self.dry_run = bool(dry_run)
@@ -601,24 +604,33 @@ class RuntimeDetectorService:
         self.model_status = MODEL_STATUS_LOADED
         self.model_error = ""
         if self.dry_run:
-            self.model_path, self.profile_config, self.classes = self._resolve_dry_run_profile(
-                profile_name,
-                model_path,
-            )
+            (
+                self.model_path,
+                self.model_format,
+                self.model_warning,
+                self.profile_config,
+                self.classes,
+            ) = self._resolve_dry_run_profile(profile_name, model_path)
             self.model_status = MODEL_STATUS_SIMULATION
         else:
             try:
-                self.model_path, self.profile_config, self.classes = self._resolve_model(
-                    profile_name,
-                    model_path,
-                )
+                (
+                    self.model_path,
+                    self.model_format,
+                    self.model_warning,
+                    self.profile_config,
+                    self.classes,
+                ) = self._resolve_model(profile_name, model_path)
             except ProfileConfigError:
                 raise
             except Exception as exc:
-                self.model_path, self.profile_config, self.classes = self._resolve_model_error_profile(
-                    profile_name,
-                    model_path,
-                )
+                (
+                    self.model_path,
+                    self.model_format,
+                    self.model_warning,
+                    self.profile_config,
+                    self.classes,
+                ) = self._resolve_model_error_profile(profile_name, model_path)
                 self.model_status = MODEL_STATUS_ERROR
                 self.model_error = str(exc)
         self.target_classes = self._load_target_classes()
@@ -734,15 +746,16 @@ class RuntimeDetectorService:
         )
 
     def _load_yolo_model(self):
-        if YOLO is None:
-            raise RuntimeError(f"Ultralytics YOLO is not available: {YOLO_IMPORT_ERROR}")
-
-        return YOLO(str(self.model_path))
+        return InferenceEngine(self.model_path, self.model_format)
 
     def _startup_details(self):
         return {
             "profile": self.profile_name,
             "model_path": str(self.model_path),
+            "model_format": self.model_format,
+            "model_format_requested": self.model_format_requested,
+            "prefer_edge_model": self.prefer_edge_model,
+            "model_warning": self.model_warning,
             "model_status": self.model_status,
             "camera_source": self.camera_source,
             "camera_backend_requested": self.camera_backend_requested,
@@ -820,6 +833,8 @@ class RuntimeDetectorService:
                 "model_path": str(self.model_path),
                 "model_status": self.model_status,
                 "model_error": self.model_error,
+                "model_format": self.model_format,
+                "model_warning": self.model_warning,
                 "model_loaded": model_loaded,
                 "camera_source": self.camera_source,
                 "camera_backend": camera_backend,
@@ -886,6 +901,8 @@ class RuntimeDetectorService:
                     "loaded": model_loaded,
                     "path": str(self.model_path),
                     "imgsz": self.imgsz,
+                    "format": self.model_format,
+                    "warning": self.model_warning or None,
                     "error": self.model_error or None,
                     "status": self.model_status,
                 },
@@ -988,11 +1005,10 @@ class RuntimeDetectorService:
                 else:
                     results = self.model.predict(
                         frame,
-                        conf=self.confidence,
+                        confidence=self.confidence,
                         imgsz=self.imgsz,
-                        verbose=False,
                     )
-                    detections = self._extract_detections(results)
+                    results, detections = results
                 inference_ms = (time.perf_counter() - inference_started) * 1000
                 detection = self.inspection.update(
                     detections,
@@ -1059,6 +1075,8 @@ class RuntimeDetectorService:
             "model_loaded": self.model_status == MODEL_STATUS_LOADED,
             "model_status": self.model_status,
             "model_path": str(self.model_path),
+            "model_format": self.model_format,
+            "model_warning": self.model_warning or None,
             "model_error": self.model_error or None,
             "inspection_result": detection.get("inspection_result", "NO_PART"),
             "pass_fail_bool": detection.get("pass_fail_bool"),
@@ -1081,6 +1099,8 @@ class RuntimeDetectorService:
             "model_path": str(self.model_path),
             "model_status": self.model_status,
             "model_error": self.model_error,
+            "model_format": self.model_format,
+            "model_warning": self.model_warning,
             "camera_source": self.camera_source,
             "camera_backend": getattr(self.camera, "backend", self.camera_backend_requested),
             "camera_connected": self._camera_connected(),
@@ -1345,6 +1365,8 @@ class RuntimeDetectorService:
                 "model_path": str(self.model_path),
                 "model_status": self.model_status,
                 "model_error": self.model_error,
+                "model_format": self.model_format,
+                "model_warning": self.model_warning,
                 "camera_source": self.camera_source,
                 "camera_backend": getattr(self.camera, "backend", self.camera_backend_requested),
                 "camera_connected": self._camera_connected(),
@@ -1389,23 +1411,6 @@ class RuntimeDetectorService:
             }
         ]
 
-    def _extract_detections(self, results):
-        detections = []
-        for result in results:
-            for box in result.boxes:
-                cls_id = int(box.cls[0])
-                class_name = result.names.get(cls_id, str(cls_id))
-                bbox = box.xyxy[0].cpu().numpy().tolist()
-                detections.append(
-                    {
-                        "class_id": cls_id,
-                        "class_name": class_name,
-                        "confidence": float(box.conf[0]),
-                        "bbox": bbox,
-                    }
-                )
-        return detections
-
     def _annotate_frame(self, frame, detections, detection):
         output = frame.copy()
         height, width = output.shape[:2]
@@ -1425,7 +1430,7 @@ class RuntimeDetectorService:
 
             class_name = item.get("class_name", "object")
             confidence = item.get("confidence")
-            is_target = class_name in self.target_classes
+            is_target = normalize_class_name(class_name) in self.target_classes
             color = BOX_COLORS["target"] if is_target else BOX_COLORS["other"]
             label = f"{class_name} {confidence:.2f}" if confidence is not None else class_name
 
@@ -1474,7 +1479,7 @@ class RuntimeDetectorService:
 
     def _load_target_classes(self):
         target_classes = self.profile_config.get("target_classes") or self.classes
-        return {str(name).strip() for name in target_classes if str(name).strip()}
+        return {normalize_class_name(name) for name in target_classes if str(name).strip()}
 
     def _load_confidence(self, override):
         if override is not None:
@@ -1599,25 +1604,20 @@ class RuntimeDetectorService:
         config = self._load_profile_config(profile_dir)
         classes = self._load_classes(profile_dir)
 
-        if model_path:
-            path = Path(model_path)
-            if not path.is_absolute():
-                path = PROJECT_ROOT / path
-        else:
-            configured_model = config.get("model_file")
-            if configured_model:
-                path = profile_dir / configured_model
-            else:
-                path = profile_dir / "latest" / "best.pt"
-                if not path.exists():
-                    path = profile_dir / "best.pt"
+        path, model_format, warning = resolve_model_path(
+            profile_dir,
+            config=config,
+            model_override=model_path,
+            model_format=self.model_format_requested,
+            prefer_edge_model=self.prefer_edge_model,
+        )
 
         if not path.exists():
             raise FileNotFoundError(
                 f"Runtime model not found for profile '{profile_name}': {path}"
             )
 
-        return path, config, classes
+        return path, model_format, warning, config, classes
 
     def _resolve_model_error_profile(self, profile_name, model_path):
         profile_dir = MODELS_DIR / profile_name
@@ -1631,7 +1631,7 @@ class RuntimeDetectorService:
         else:
             path = profile_dir / "MODEL_ERROR"
 
-        return path, config, classes
+        return path, self.model_format_requested, "", config, classes
 
     def _resolve_dry_run_profile(self, profile_name, model_path):
         profile_dir = MODELS_DIR / profile_name
@@ -1665,7 +1665,7 @@ class RuntimeDetectorService:
         if not path.exists():
             path = profile_dir / "DRY_RUN_NO_MODEL"
 
-        return path, config, classes
+        return path, self.model_format_requested, "", config, classes
 
     @staticmethod
     def _load_profile_config(profile_dir):
@@ -1766,6 +1766,18 @@ def main():
     parser.add_argument("--profile", default=os.getenv("VISION_MODEL_PROFILE", ACTIVE_MODEL_PROFILE))
     parser.add_argument("--model", default=os.getenv("VISION_MODEL_PATH"))
     parser.add_argument(
+        "--model-format",
+        choices=(MODEL_FORMAT_AUTO, MODEL_FORMAT_PT, MODEL_FORMAT_NCNN),
+        default=os.getenv("VISION_MODEL_FORMAT", MODEL_FORMAT_AUTO),
+        help="Model format to load. Use auto for .pt files or exported NCNN model folders.",
+    )
+    parser.add_argument(
+        "--prefer-edge-model",
+        action="store_true",
+        default=os.getenv("VISION_PREFER_EDGE_MODEL", "").lower() in {"1", "true", "yes", "on"},
+        help="Prefer exported edge models such as best_ncnn_model/ when available.",
+    )
+    parser.add_argument(
         "--camera",
         type=int,
         default=int(camera_index_env) if camera_index_env else None,
@@ -1857,6 +1869,8 @@ def main():
         service = RuntimeDetectorService(
             profile_name=args.profile,
             model_path=args.model,
+            model_format=args.model_format,
+            prefer_edge_model=args.prefer_edge_model,
             camera_index=args.camera,
             camera_source=args.camera_source,
             camera_backend=args.camera_backend,

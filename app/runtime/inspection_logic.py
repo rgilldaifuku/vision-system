@@ -12,6 +12,10 @@ MODEL_ERROR = "MODEL_ERROR"
 SIMULATION = "SIMULATION"
 
 
+def normalize_class_name(name):
+    return str(name).strip().lower().replace(" ", "_")
+
+
 @dataclass
 class InspectionState:
     stable_detected: bool = False
@@ -197,10 +201,12 @@ class InspectionLogic:
         self.state.result_message = message
 
     def _class_result(self, class_name):
-        if class_name in self.acceptable_classes:
+        normalized_class = normalize_class_name(class_name)
+
+        if normalized_class in self.acceptable_classes:
             return PASS, True, f"Accepted class '{class_name}' detected."
 
-        if class_name in self.reject_classes:
+        if normalized_class in self.reject_classes:
             return FAIL, False, f"Reject class '{class_name}' detected."
 
         return FAIL, False, f"Class '{class_name}' is not acceptable."
@@ -255,7 +261,7 @@ class InspectionLogic:
 
     @staticmethod
     def _clean_class_set(values):
-        return {str(name).strip() for name in values if str(name).strip()}
+        return {normalize_class_name(name) for name in values if str(name).strip()}
 
     @staticmethod
     def _safe_float(value, default):

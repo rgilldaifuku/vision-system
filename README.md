@@ -87,6 +87,14 @@ deploy/install_pi_runtime.sh
 
 See [README_PI_RUNTIME_SETUP.md](README_PI_RUNTIME_SETUP.md) for the Pi-specific install, validation, runtime, and detection-debug workflow.
 
+For Raspberry Pi 4 inference, export an NCNN model on the desktop with:
+
+```bash
+python scripts/export_profile_to_ncnn.py --profile yellow_daifuku --imgsz 320
+```
+
+The Pi launcher prefers `models/<profile>/best_ncnn_model/` when it exists.
+
 Recommended local setup:
 
 ```bash
