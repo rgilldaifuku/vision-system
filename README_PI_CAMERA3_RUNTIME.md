@@ -137,6 +137,42 @@ Quality warning meaning:
 
 Every saved review/debug/model-test image gets a `.json` sidecar with image quality, preprocessing, ROI, model, and inspection metadata.
 
+## Dataset Image Capture
+
+Use the Pi camera setup to collect raw training images without loading YOLO, NCNN, PyTorch, or Flask:
+
+```bash
+python scripts/capture_dataset_images.py \
+  --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
+  --label positive \
+  --session pi_demo_v1 \
+  --count 30 \
+  --interval-seconds 2 \
+  --save-quality-warnings
+```
+
+Collect negative examples in the same session:
+
+```bash
+python scripts/capture_dataset_images.py \
+  --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
+  --label negative \
+  --session pi_demo_v1 \
+  --count 20 \
+  --interval-seconds 2 \
+  --save-quality-warnings
+```
+
+Captured images are stored under:
+
+```text
+data/collections/<profile>/<camera_profile>/<session>/
+```
+
+Each image gets a `.json` sidecar with image-quality metrics and camera-profile details. The session also gets `manifest.jsonl` and `session_summary.json`. These are raw collection images only. Label them externally, then build or update the YOLO dataset under `data/datasets/` as a separate step.
+
 ## Runtime Command
 
 ```bash

@@ -5,7 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -15,6 +15,7 @@ import numpy as np
 
 import app.runtime.detector_service as detector_service
 import app.runtime.health_check as health_check
+from scripts import capture_dataset_images
 from app.runtime.camera_profile import CameraProfileError, load_camera_profile
 from app.runtime.action_manager import ActionManager
 from app.runtime.camera_sources import SimulatedCameraSource
@@ -498,6 +499,125 @@ class RuntimeTests(unittest.TestCase):
     def test_missing_camera_profile_has_clear_error(self):
         with self.assertRaisesRegex(CameraProfileError, "Camera profile not found"):
             load_camera_profile("does_not_exist")
+
+    def test_capture_dataset_output_path_construction(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = capture_dataset_images.build_session_paths(
+                Path(tmpdir),
+                "yellow_daifuku",
+                "pi_camera3",
+                "pi_demo_v1",
+                "positive",
+            )
+
+            self.assertEqual(paths["label_dir"].name, "positive")
+            self.assertEqual(paths["session_dir"].name, "pi_demo_v1")
+            self.assertEqual(paths["manifest_path"].name, "manifest.jsonl")
+            self.assertEqual(paths["summary_path"].name, "session_summary.json")
+
+    def test_capture_dataset_dry_run_writes_manifest_summary_and_sidecars(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = capture_dataset_images.create_parser().parse_args(
+                [
+                    "--label",
+                    "positive",
+                    "--session",
+                    "unit_test",
+                    "--count",
+                    "2",
+                    "--interval-seconds",
+                    "0",
+                    "--warmup-seconds",
+                    "0",
+                    "--output-root",
+                    tmpdir,
+                    "--dry-run",
+                ]
+            )
+
+            with redirect_stdout(StringIO()):
+                summary = capture_dataset_images.run_capture(args)
+            session_dir = Path(tmpdir) / "yellow_daifuku" / "pi_camera3" / "unit_test"
+            image_path = session_dir / "positive" / "image_0001.jpg"
+            sidecar_path = session_dir / "positive" / "image_0001.json"
+            manifest_path = session_dir / "manifest.jsonl"
+            summary_path = session_dir / "session_summary.json"
+
+            self.assertEqual(summary["images_requested"], 2)
+            self.assertEqual(summary["images_saved"], 2)
+            self.assertTrue(image_path.exists())
+            self.assertTrue(sidecar_path.exists())
+            self.assertTrue(manifest_path.exists())
+            self.assertTrue(summary_path.exists())
+
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            self.assertEqual(sidecar["profile"], "yellow_daifuku")
+            self.assertEqual(sidecar["camera_profile"], "pi_camera3")
+            self.assertEqual(sidecar["label"], "positive")
+            self.assertTrue(sidecar["dry_run"])
+            self.assertIn("image_quality", sidecar)
+
+            manifest_lines = manifest_path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(manifest_lines), 2)
+
+    def test_capture_dataset_label_validation(self):
+        parser = capture_dataset_images.create_parser()
+        with redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["--label", "unknown", "--session", "bad"])
+
+    def test_capture_dataset_invalid_camera_profile_error(self):
+        args = capture_dataset_images.create_parser().parse_args(
+            [
+                "--camera-profile",
+                "does_not_exist",
+                "--label",
+                "negative",
+                "--session",
+                "bad_profile",
+                "--dry-run",
+            ]
+        )
+        with self.assertRaisesRegex(CameraProfileError, "Camera profile not found"):
+            with redirect_stdout(StringIO()):
+                capture_dataset_images.run_capture(args)
+
+    def test_capture_dataset_metadata_sidecar_creation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = capture_dataset_images.create_parser().parse_args(
+                [
+                    "--label",
+                    "negative",
+                    "--session",
+                    "metadata_test",
+                    "--count",
+                    "1",
+                    "--interval-seconds",
+                    "0",
+                    "--output-root",
+                    tmpdir,
+                    "--save-quality-warnings",
+                    "--dry-run",
+                ]
+            )
+
+            with redirect_stdout(StringIO()):
+                capture_dataset_images.run_capture(args)
+            sidecar_path = (
+                Path(tmpdir)
+                / "yellow_daifuku"
+                / "pi_camera3"
+                / "metadata_test"
+                / "negative"
+                / "image_0001.json"
+            )
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(sidecar["session"], "metadata_test")
+            self.assertEqual(sidecar["capture_index"], 1)
+            self.assertEqual(sidecar["saved_index"], 1)
+            self.assertIn("camera_settings", sidecar)
+            self.assertIn("quality_status", sidecar["image_quality"])
 
     def test_image_quality_detects_dark_bright_blurry_and_invalid_frames(self):
         dark = np.zeros((40, 40, 3), dtype=np.uint8)

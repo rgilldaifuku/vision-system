@@ -173,6 +173,44 @@ python scripts/validate_runtime.py \
 
 The dashboard and `/status` expose `image_quality`, `preprocessing`, and camera-profile details. Review/debug/model-test images also get `.json` sidecars for retraining evidence.
 
+## Capture Raw Dataset Images
+
+After the camera-only dashboard and camera validation look good, collect raw images for external labeling. This capture tool does not load YOLO, NCNN, PyTorch, or Flask, and it does not move images into the final YOLO dataset folder.
+
+Positive examples:
+
+```bash
+python scripts/capture_dataset_images.py \
+  --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
+  --label positive \
+  --session pi_demo_v1 \
+  --count 30 \
+  --interval-seconds 2 \
+  --save-quality-warnings
+```
+
+Negative examples:
+
+```bash
+python scripts/capture_dataset_images.py \
+  --profile yellow_daifuku \
+  --camera-profile pi_camera3 \
+  --label negative \
+  --session pi_demo_v1 \
+  --count 20 \
+  --interval-seconds 2 \
+  --save-quality-warnings
+```
+
+Output is written to:
+
+```text
+data/collections/<profile>/<camera_profile>/<session>/
+```
+
+Each saved image has a matching JSON sidecar, and the session includes `manifest.jsonl` plus `session_summary.json`. Treat this folder as raw collection evidence. Label the useful images externally before creating or updating a YOLO dataset under `data/datasets/`.
+
 ## Camera Profiles And Runtime Modes
 
 Camera profiles live under:
