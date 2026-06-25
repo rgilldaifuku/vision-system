@@ -692,6 +692,23 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertEqual([path.name for path in remaining], ["b.jpg"])
 
+    def test_label_images_only_images_filters_exact_requested_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_dir = Path(tmpdir) / "positive"
+            image_dir.mkdir()
+            for name in ("image_0001.jpg", "image_0003.jpg", "image_0013.jpg"):
+                (image_dir / name).write_text("x", encoding="utf-8")
+
+            image_paths = label_images.find_image_paths(image_dir)
+            selected = label_images.filter_only_images(
+                image_paths,
+                ["image_0003.jpg", "image_0013.jpg"],
+            )
+
+            self.assertEqual([path.name for path in selected], ["image_0003.jpg", "image_0013.jpg"])
+            with self.assertRaisesRegex(FileNotFoundError, "not found"):
+                label_images.filter_only_images(image_paths, ["missing.jpg"])
+
     def test_label_images_empty_negative_label_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             label_path = Path(tmpdir) / "image_0001.txt"
@@ -708,6 +725,56 @@ class RuntimeTests(unittest.TestCase):
             boxes = label_images.load_yolo_label(label_path, image_width=200, image_height=100)
 
             self.assertEqual(boxes, [(0, 75, 25, 125, 75)])
+
+    def test_label_images_edge_clamping_keeps_yolo_values_in_range(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            label_path = Path(tmpdir) / "image_0001.txt"
+            label_images.save_yolo_label(
+                label_path,
+                [
+                    (0, -10, -5, 110, 85),
+                    (0, 50, 50, 50, 90),
+                ],
+                image_width=100,
+                image_height=80,
+            )
+
+            lines = label_path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(lines), 1)
+            parts = lines[0].split()
+            self.assertEqual(parts[0], "0")
+            values = [float(value) for value in parts[1:]]
+            self.assertTrue(all(0.0 <= value <= 1.0 for value in values))
+            self.assertEqual(values[2], 1.0)
+            self.assertEqual(values[3], 1.0)
+
+    def test_label_images_existing_labels_can_be_overwritten_after_targeted_load(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_dir = Path(tmpdir) / "positive"
+            label_dir = Path(tmpdir) / "labels"
+            image_dir.mkdir()
+            label_dir.mkdir()
+            image_path = image_dir / "image_0003.jpg"
+            write_test_image(image_path, width=200, height=100)
+            label_path = label_dir / "image_0003.txt"
+            label_path.write_text("0 0.500000 0.500000 0.250000 0.500000\n", encoding="utf-8")
+
+            selected = label_images.filter_only_images(
+                label_images.find_image_paths(image_dir),
+                ["image_0003.jpg"],
+            )
+            loaded_boxes = label_images.load_yolo_label(label_path, image_width=200, image_height=100)
+            self.assertEqual([path.name for path in selected], ["image_0003.jpg"])
+            self.assertEqual(loaded_boxes, [(0, 75, 25, 125, 75)])
+
+            label_images.save_yolo_label(
+                label_path,
+                [(0, 0, 0, 210, 100)],
+                image_width=200,
+                image_height=100,
+            )
+            rewritten = label_path.read_text(encoding="utf-8").strip()
+            self.assertEqual(rewritten, "0 0.500000 0.500000 1.000000 1.000000")
 
     def test_build_pi_camera_dataset_excludes_holdout_and_prefixes_filenames(self):
         with tempfile.TemporaryDirectory() as collections_tmp, tempfile.TemporaryDirectory() as datasets_tmp:
