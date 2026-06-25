@@ -15,6 +15,7 @@ import numpy as np
 
 import app.runtime.detector_service as detector_service
 import app.runtime.health_check as health_check
+import training.build_pi_camera_dataset as build_pi_camera_dataset
 import training.label_images as label_images
 from scripts import capture_dataset_images
 from app.runtime.camera_profile import CameraProfileError, load_camera_profile
@@ -94,6 +95,41 @@ def write_test_image(path, width=64, height=48, value=90):
     frame = np.full((height, width, 3), value, dtype=np.uint8)
     cv2.imwrite(str(path), frame)
     return frame
+
+
+def create_pi_collection_fixture(root):
+    source_root = Path(root)
+    sessions = [
+        ("pi_demo_v1_pos_a", "positive", "0 0.500000 0.500000 0.250000 0.250000\n"),
+        ("pi_demo_v1_pos_b", "positive", "0 0.400000 0.400000 0.200000 0.200000\n"),
+        ("pi_demo_v1_pos_c", "positive", "0 0.600000 0.600000 0.200000 0.200000\n"),
+        ("pi_demo_v1_negatives", "negative", ""),
+        ("pi_demo_v1_negatives_resume", "negative", ""),
+    ]
+
+    for index, (session, subdir, label_text) in enumerate(sessions, start=1):
+        image_dir = source_root / session / subdir
+        label_dir = source_root / session / "labels"
+        image_dir.mkdir(parents=True)
+        label_dir.mkdir(parents=True)
+        write_test_image(image_dir / "image_0001.jpg", value=40 + index)
+        (label_dir / "image_0001.txt").write_text(label_text, encoding="utf-8")
+
+    for session, subdir in (
+        ("pi_demo_v1_holdout_positive", "positive"),
+        ("pi_demo_v1_holdout_negative", "negative"),
+    ):
+        image_dir = source_root / session / subdir
+        label_dir = source_root / session / "labels"
+        image_dir.mkdir(parents=True)
+        label_dir.mkdir(parents=True)
+        write_test_image(image_dir / "image_0001.jpg", value=240)
+        (label_dir / "image_0001.txt").write_text(
+            "9 9.000000 9.000000 9.000000 9.000000\n",
+            encoding="utf-8",
+        )
+
+    return source_root
 
 
 class RuntimeTests(unittest.TestCase):
@@ -672,6 +708,120 @@ class RuntimeTests(unittest.TestCase):
             boxes = label_images.load_yolo_label(label_path, image_width=200, image_height=100)
 
             self.assertEqual(boxes, [(0, 75, 25, 125, 75)])
+
+    def test_build_pi_camera_dataset_excludes_holdout_and_prefixes_filenames(self):
+        with tempfile.TemporaryDirectory() as collections_tmp, tempfile.TemporaryDirectory() as datasets_tmp:
+            source_root = create_pi_collection_fixture(collections_tmp)
+
+            report = build_pi_camera_dataset.build_dataset(
+                output_name="built",
+                seed=42,
+                val_ratio=0.2,
+                overwrite=False,
+                source_root=source_root,
+                datasets_dir=Path(datasets_tmp),
+            )
+            output_dir = Path(report["output_path"])
+            copied_images = list((output_dir / "images").glob("*/*.jpg"))
+
+            self.assertEqual(report["positive_count"], 3)
+            self.assertEqual(report["negative_count"], 2)
+            self.assertEqual(report["excluded_holdout_sessions"], [
+                "pi_demo_v1_holdout_positive",
+                "pi_demo_v1_holdout_negative",
+            ])
+            self.assertTrue(all("holdout" not in path.name for path in copied_images))
+            self.assertEqual(len({path.name for path in copied_images}), 5)
+            self.assertTrue(any(path.name.startswith("pi_demo_v1_pos_a__") for path in copied_images))
+            self.assertTrue((output_dir / "data.yaml").exists())
+            self.assertTrue((output_dir / "dataset_report.json").exists())
+
+    def test_build_pi_camera_dataset_preserves_empty_negative_labels(self):
+        with tempfile.TemporaryDirectory() as collections_tmp, tempfile.TemporaryDirectory() as datasets_tmp:
+            source_root = create_pi_collection_fixture(collections_tmp)
+
+            report = build_pi_camera_dataset.build_dataset(
+                output_name="built",
+                source_root=source_root,
+                datasets_dir=Path(datasets_tmp),
+            )
+            output_dir = Path(report["output_path"])
+            negative_labels = [
+                path
+                for path in (output_dir / "labels").glob("*/*.txt")
+                if "negatives" in path.name
+            ]
+
+            self.assertEqual(len(negative_labels), 2)
+            self.assertTrue(all(path.read_text(encoding="utf-8") == "" for path in negative_labels))
+
+    def test_build_pi_camera_dataset_split_is_deterministic(self):
+        with tempfile.TemporaryDirectory() as collections_tmp:
+            source_root = create_pi_collection_fixture(collections_tmp)
+            samples = build_pi_camera_dataset.discover_samples(source_root)
+
+            first_train, first_val = build_pi_camera_dataset.split_balanced(
+                samples,
+                seed=7,
+                val_ratio=0.4,
+            )
+            second_train, second_val = build_pi_camera_dataset.split_balanced(
+                samples,
+                seed=7,
+                val_ratio=0.4,
+            )
+
+            self.assertEqual(
+                [sample.output_image_name for sample in first_train],
+                [sample.output_image_name for sample in second_train],
+            )
+            self.assertEqual(
+                [sample.output_image_name for sample in first_val],
+                [sample.output_image_name for sample in second_val],
+            )
+            self.assertGreaterEqual(sum(1 for sample in first_val if sample.category == "positive"), 1)
+            self.assertGreaterEqual(sum(1 for sample in first_val if sample.category == "negative"), 1)
+
+    def test_build_pi_camera_dataset_invalid_and_missing_labels_fail(self):
+        with tempfile.TemporaryDirectory() as collections_tmp:
+            source_root = create_pi_collection_fixture(collections_tmp)
+            bad_label = source_root / "pi_demo_v1_pos_a" / "labels" / "image_0001.txt"
+            bad_label.write_text("1 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "class id must be 0"):
+                build_pi_camera_dataset.discover_samples(source_root)
+
+            bad_label.write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+            missing_label = source_root / "pi_demo_v1_pos_b" / "labels" / "image_0001.txt"
+            missing_label.unlink()
+
+            with self.assertRaisesRegex(ValueError, "Missing label"):
+                build_pi_camera_dataset.discover_samples(source_root)
+
+    def test_build_pi_camera_dataset_does_not_modify_source_files(self):
+        with tempfile.TemporaryDirectory() as collections_tmp, tempfile.TemporaryDirectory() as datasets_tmp:
+            source_root = create_pi_collection_fixture(collections_tmp)
+            source_files = [
+                path
+                for path in source_root.glob("*/*/*")
+                if path.is_file()
+            ]
+            before = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in source_files
+            }
+
+            build_pi_camera_dataset.build_dataset(
+                output_name="built",
+                source_root=source_root,
+                datasets_dir=Path(datasets_tmp),
+            )
+
+            after = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in source_files
+            }
+            self.assertEqual(before, after)
 
     def test_image_quality_detects_dark_bright_blurry_and_invalid_frames(self):
         dark = np.zeros((40, 40, 3), dtype=np.uint8)
