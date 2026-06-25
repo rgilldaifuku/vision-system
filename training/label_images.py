@@ -31,6 +31,11 @@ def create_parser():
         action="store_true",
         help="Only open images that do not already have a matching .txt label file.",
     )
+    parser.add_argument(
+        "--only-images",
+        nargs="+",
+        help="Exact image filenames to process from --image-dir, for targeted corrections.",
+    )
     return parser
 
 
@@ -60,6 +65,23 @@ def filter_unlabeled_images(image_paths, label_dir):
     return [path for path in image_paths if not (label_dir / f"{path.stem}.txt").exists()]
 
 
+def filter_only_images(image_paths, requested_filenames):
+    if not requested_filenames:
+        return image_paths
+
+    requested = list(requested_filenames)
+    requested_set = set(requested)
+    by_name = {path.name: path for path in image_paths}
+    missing = [name for name in requested if name not in by_name]
+    if missing:
+        raise FileNotFoundError(
+            "Requested image file(s) not found directly inside source folder: "
+            + ", ".join(missing)
+        )
+
+    return [by_name[name] for name in requested if name in requested_set]
+
+
 def mouse_callback(event, x, y, flags, param):
     global drawing, start_x, start_y, boxes
 
@@ -78,18 +100,45 @@ def mouse_callback(event, x, y, flags, param):
             boxes.append((CLASS_ID, x1, y1, x2, y2))
 
 
+def clamp_box(box, image_width, image_height):
+    _class_id, x1, y1, x2, y2 = box
+    clamped_x1 = min(max(float(x1), 0.0), float(image_width))
+    clamped_y1 = min(max(float(y1), 0.0), float(image_height))
+    clamped_x2 = min(max(float(x2), 0.0), float(image_width))
+    clamped_y2 = min(max(float(y2), 0.0), float(image_height))
+
+    left = min(clamped_x1, clamped_x2)
+    right = max(clamped_x1, clamped_x2)
+    top = min(clamped_y1, clamped_y2)
+    bottom = max(clamped_y1, clamped_y2)
+
+    if right <= left or bottom <= top:
+        return None
+    return (CLASS_ID, left, top, right, bottom)
+
+
+def clamp_unit(value):
+    return min(max(float(value), 0.0), 1.0)
+
+
 def save_yolo_label(label_path, boxes_to_save, image_width, image_height):
     label_path = Path(label_path)
     label_path.parent.mkdir(parents=True, exist_ok=True)
     with label_path.open("w", encoding="utf-8") as handle:
-        for _class_id, x1, y1, x2, y2 in boxes_to_save:
+        for box in boxes_to_save:
+            clamped_box = clamp_box(box, image_width, image_height)
+            if clamped_box is None:
+                continue
+
+            _class_id, x1, y1, x2, y2 = clamped_box
             center_x = ((x1 + x2) / 2) / image_width
             center_y = ((y1 + y2) / 2) / image_height
             width = (x2 - x1) / image_width
             height = (y2 - y1) / image_height
 
             handle.write(
-                f"{CLASS_ID} {center_x:.6f} {center_y:.6f} {width:.6f} {height:.6f}\n"
+                f"{CLASS_ID} {clamp_unit(center_x):.6f} {clamp_unit(center_y):.6f} "
+                f"{clamp_unit(width):.6f} {clamp_unit(height):.6f}\n"
             )
 
 
@@ -212,6 +261,7 @@ def main(argv=None):
         image_dir = Path(args.image_dir).expanduser().resolve()
         label_dir = resolve_label_dir(image_dir, args.label_dir)
         image_paths = find_image_paths(image_dir)
+        image_paths = filter_only_images(image_paths, args.only_images)
         if args.skip_labeled:
             image_paths = filter_unlabeled_images(image_paths, label_dir)
 
