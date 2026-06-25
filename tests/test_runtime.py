@@ -15,6 +15,7 @@ import numpy as np
 
 import app.runtime.detector_service as detector_service
 import app.runtime.health_check as health_check
+import training.label_images as label_images
 from scripts import capture_dataset_images
 from app.runtime.camera_profile import CameraProfileError, load_camera_profile
 from app.runtime.action_manager import ActionManager
@@ -618,6 +619,59 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(sidecar["saved_index"], 1)
             self.assertIn("camera_settings", sidecar)
             self.assertIn("quality_status", sidecar["image_quality"])
+
+    def test_label_images_default_label_dir_is_session_labels(self):
+        image_dir = Path("/tmp/collections/yellow_daifuku/pi_camera3/session_a/positive")
+        label_dir = label_images.resolve_label_dir(image_dir)
+
+        self.assertEqual(label_dir, (image_dir.parent / "labels").resolve())
+
+    def test_label_images_finds_only_direct_supported_images(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_dir = Path(tmpdir) / "positive"
+            nested_dir = image_dir / "nested"
+            nested_dir.mkdir(parents=True)
+            for name in ("a.jpg", "b.jpeg", "c.png", "ignore.txt"):
+                (image_dir / name).write_text("x", encoding="utf-8")
+            (nested_dir / "nested.jpg").write_text("x", encoding="utf-8")
+
+            paths = label_images.find_image_paths(image_dir)
+
+            self.assertEqual([path.name for path in paths], ["a.jpg", "b.jpeg", "c.png"])
+
+    def test_label_images_skip_labeled_uses_matching_txt_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_dir = Path(tmpdir) / "positive"
+            label_dir = Path(tmpdir) / "labels"
+            image_dir.mkdir()
+            label_dir.mkdir()
+            (image_dir / "a.jpg").write_text("x", encoding="utf-8")
+            (image_dir / "b.jpg").write_text("x", encoding="utf-8")
+            (label_dir / "a.txt").write_text("", encoding="utf-8")
+
+            remaining = label_images.filter_unlabeled_images(
+                label_images.find_image_paths(image_dir),
+                label_dir,
+            )
+
+            self.assertEqual([path.name for path in remaining], ["b.jpg"])
+
+    def test_label_images_empty_negative_label_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            label_path = Path(tmpdir) / "image_0001.txt"
+            label_images.save_yolo_label(label_path, [], image_width=100, image_height=80)
+
+            self.assertTrue(label_path.exists())
+            self.assertEqual(label_path.read_text(encoding="utf-8"), "")
+
+    def test_label_images_loads_existing_yolo_boxes_as_class_zero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            label_path = Path(tmpdir) / "image_0001.txt"
+            label_path.write_text("7 0.500000 0.500000 0.250000 0.500000\n", encoding="utf-8")
+
+            boxes = label_images.load_yolo_label(label_path, image_width=200, image_height=100)
+
+            self.assertEqual(boxes, [(0, 75, 25, 125, 75)])
 
     def test_image_quality_detects_dark_bright_blurry_and_invalid_frames(self):
         dark = np.zeros((40, 40, 3), dtype=np.uint8)
