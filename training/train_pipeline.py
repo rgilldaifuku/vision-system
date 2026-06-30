@@ -225,13 +225,21 @@ def _format_validation_failure(errors, summary):
 
     return "\n".join(lines)
 
-def _validate_label_file(label_path, allowed_class_ids, errors, summary=None):
+def _validate_label_file(
+    label_path,
+    allowed_class_ids,
+    errors,
+    summary=None,
+    allow_empty=False,
+    allow_segmentation=False,
+):
     text = label_path.read_text(encoding="utf-8", errors="replace")
 
     if not text.strip():
-        errors.append(f"{label_path}: label file is empty.")
         if summary is not None:
             summary["empty_labels"] += 1
+        if not allow_empty:
+            errors.append(f"{label_path}: label file is empty.")
         return
 
     for line_number, line in enumerate(text.splitlines(), start=1):
@@ -251,9 +259,17 @@ def _validate_label_file(label_path, allowed_class_ids, errors, summary=None):
             line_invalid = True
 
         parts = stripped.split()
-        if len(parts) != 5:
+        valid_length = len(parts) == 5
+        if allow_segmentation:
+            valid_length = valid_length or (len(parts) >= 7 and len(parts) % 2 == 1)
+        if not valid_length:
+            expected = (
+                "a 5-value YOLO box or a class id followed by at least 3 coordinate pairs"
+                if allow_segmentation
+                else "exactly 5 values"
+            )
             errors.append(
-                f"{label_path}: line {line_number}: expected exactly 5 values, got {len(parts)}."
+                f"{label_path}: line {line_number}: expected {expected}, got {len(parts)} values."
             )
             _increment_invalid_label(summary)
             continue
@@ -273,7 +289,13 @@ def _validate_label_file(label_path, allowed_class_ids, errors, summary=None):
             )
             line_invalid = True
 
-        for name, value_text in zip(("x_center", "y_center", "width", "height"), parts[1:]):
+        is_box = len(parts) == 5
+        for coordinate_index, value_text in enumerate(parts[1:], start=1):
+            name = (
+                ("x_center", "y_center", "width", "height")[coordinate_index - 1]
+                if is_box
+                else f"polygon_coordinate_{coordinate_index}"
+            )
             try:
                 value = float(value_text)
             except ValueError:
@@ -327,8 +349,14 @@ def write_training_report(dataset_name, version_name, run_dir, data_yaml, metric
 
     print(f"Training report saved: {report_path}")
     
-def validate_dataset(dataset_name):
-    dataset_dir = DATASETS_DIR / dataset_name
+def validate_dataset(
+    dataset_name,
+    allow_empty_labels=False,
+    allow_segmentation=False,
+    return_summary=False,
+    dataset_dir=None,
+):
+    dataset_dir = Path(dataset_dir) if dataset_dir is not None else DATASETS_DIR / dataset_name
 
     images_train = dataset_dir / "images" / "train"
     images_val = dataset_dir / "images" / "val"
@@ -397,7 +425,14 @@ def validate_dataset(dataset_name):
             )
 
         for label_path in labels_by_split[split_name].values():
-            _validate_label_file(label_path, allowed_class_ids, errors, summary)
+            _validate_label_file(
+                label_path,
+                allowed_class_ids,
+                errors,
+                summary,
+                allow_empty=allow_empty_labels,
+                allow_segmentation=allow_segmentation,
+            )
 
     duplicate_stems = sorted(set(images_by_split["train"]) & set(images_by_split["val"]))
     for stem in duplicate_stems:
@@ -413,6 +448,15 @@ def validate_dataset(dataset_name):
     print(f"Train labels: {train_labels}")
     print(f"Val labels: {val_labels}")
 
+    if return_summary:
+        return data_yaml, {
+            **summary,
+            "train_images": train_images,
+            "validation_images": val_images,
+            "train_labels": train_labels,
+            "validation_labels": val_labels,
+            "negative_labels": summary["empty_labels"],
+        }
     return data_yaml
 
 def train_model(dataset_name, data_yaml):
