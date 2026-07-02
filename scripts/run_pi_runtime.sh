@@ -17,6 +17,10 @@ CAMERA_PROFILE="${CAMERA_PROFILE:-pi_camera3}"
 CAMERA_ONLY="${CAMERA_ONLY:-0}"
 DISABLE_INFERENCE="${DISABLE_INFERENCE:-0}"
 MODEL_FORMAT="${MODEL_FORMAT:-auto}"
+MODEL_PATH="${MODEL_PATH:-}"
+DEBUG_CAPTURE_ON_DETECTION="${DEBUG_CAPTURE_ON_DETECTION:-0}"
+DEBUG_DIR="${DEBUG_DIR:-}"
+DEBUG_MAX_CAPTURES="${DEBUG_MAX_CAPTURES:-5}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 if [ ! -f "$VENV_DIR/bin/activate" ]; then
@@ -32,6 +36,12 @@ echo "  profile=$PROFILE backend=$CAMERA_BACKEND host=$HOST port=$PORT"
 echo "  imgsz=$IMGSZ frame=${FRAME_WIDTH}x${FRAME_HEIGHT} interval_ms=$INTERVAL_MS"
 if [ -n "$CAMERA_PROFILE" ]; then
   echo "  camera_profile=$CAMERA_PROFILE"
+fi
+if [ -n "$MODEL_PATH" ]; then
+  echo "  model_override=$MODEL_PATH format=$MODEL_FORMAT"
+fi
+if [ "$DEBUG_CAPTURE_ON_DETECTION" = "1" ] || [ "$DEBUG_CAPTURE_ON_DETECTION" = "true" ]; then
+  echo "  detection_debug=enabled max_captures=$DEBUG_MAX_CAPTURES dir=${DEBUG_DIR:-default}"
 fi
 
 ARGS=(
@@ -49,6 +59,17 @@ ARGS=(
 
 if [ -n "$CAMERA_PROFILE" ]; then
   ARGS+=(--camera-profile "$CAMERA_PROFILE")
+fi
+
+if [ -n "$MODEL_PATH" ]; then
+  ARGS+=(--model-path "$MODEL_PATH")
+fi
+
+if [ "$DEBUG_CAPTURE_ON_DETECTION" = "1" ] || [ "$DEBUG_CAPTURE_ON_DETECTION" = "true" ]; then
+  ARGS+=(--debug-capture-on-detection --debug-max-captures "$DEBUG_MAX_CAPTURES")
+  if [ -n "$DEBUG_DIR" ]; then
+    ARGS+=(--debug-dir "$DEBUG_DIR")
+  fi
 fi
 
 if [ "$CAMERA_ONLY" = "1" ] || [ "$CAMERA_ONLY" = "true" ]; then

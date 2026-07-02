@@ -1,6 +1,8 @@
 from pathlib import Path
 import platform
 
+import yaml
+
 MODEL_FORMAT_AUTO = "auto"
 MODEL_FORMAT_PT = "pt"
 MODEL_FORMAT_NCNN = "ncnn"
@@ -132,6 +134,48 @@ def is_arm_linux():
     machine = platform.machine().lower()
     return platform.system().lower() == "linux" and (
         machine.startswith("arm") or machine in {"aarch64", "arm64"}
+    )
+
+
+def read_model_input_size(model_path):
+    """Return exported model input size as (width, height), when metadata provides it."""
+    model_path = Path(model_path)
+    if not model_path.is_dir():
+        return None
+
+    metadata_path = model_path / "metadata.yaml"
+    if not metadata_path.is_file():
+        return None
+    try:
+        metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+
+    imgsz = metadata.get("imgsz")
+    if isinstance(imgsz, (int, float)):
+        size = int(imgsz)
+        return (size, size) if size > 0 else None
+    if isinstance(imgsz, (list, tuple)) and len(imgsz) == 2:
+        try:
+            height, width = (int(imgsz[0]), int(imgsz[1]))
+        except (TypeError, ValueError):
+            return None
+        return (width, height) if width > 0 and height > 0 else None
+    return None
+
+
+def model_input_size_warning(model_path, runtime_imgsz):
+    expected = read_model_input_size(model_path)
+    if expected is None:
+        return ""
+
+    runtime_size = (int(runtime_imgsz), int(runtime_imgsz))
+    if expected == runtime_size:
+        return ""
+    return (
+        f"Runtime imgsz {runtime_size[0]}x{runtime_size[1]} conflicts with exported "
+        f"model input {expected[0]}x{expected[1]} from {Path(model_path) / 'metadata.yaml'}. "
+        "The runtime size was not changed."
     )
 
 

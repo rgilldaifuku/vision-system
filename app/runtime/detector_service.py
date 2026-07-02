@@ -34,6 +34,7 @@ from app.runtime.inference_engine import (
     MODEL_FORMAT_AUTO,
     MODEL_FORMAT_NCNN,
     MODEL_FORMAT_PT,
+    model_input_size_warning,
     resolve_model_path,
 )
 from app.runtime.image_quality import (
@@ -686,8 +687,12 @@ class RuntimeDetectorService:
         debug_detections=False,
         save_debug_frames=False,
         debug_frame_limit=20,
+        debug_capture_on_detection=False,
+        debug_dir=None,
+        debug_max_captures=5,
     ):
         self.profile_name = profile_name
+        self.model_override_path = str(model_path) if model_path else ""
         self.model_format_requested = model_format or MODEL_FORMAT_AUTO
         self.prefer_edge_model = bool(prefer_edge_model)
         self.camera_source = str(camera_source) if camera_source else ""
@@ -761,6 +766,11 @@ class RuntimeDetectorService:
             miss_required_frames=miss_required_frames,
         )
         self.imgsz = max(1, int(imgsz))
+        size_warning = model_input_size_warning(self.model_path, self.imgsz)
+        if size_warning:
+            self.model_warning = " ".join(
+                warning for warning in (self.model_warning, size_warning) if warning
+            )
         self.frame_width = max(
             1,
             int(frame_width or (self.camera_profile.width if self.camera_profile else DEFAULT_FRAME_WIDTH)),
@@ -776,6 +786,11 @@ class RuntimeDetectorService:
         self.save_debug_frames = bool(save_debug_frames or debug_detections)
         self.debug_frame_limit = max(0, int(debug_frame_limit))
         self.debug_frame_count = 0
+        self.debug_capture_on_detection = bool(debug_capture_on_detection)
+        debug_root = Path(debug_dir) if debug_dir else DEBUG_FRAMES_DIR / "live_detections"
+        self.debug_dir = debug_root if debug_root.is_absolute() else PROJECT_ROOT / debug_root
+        self.debug_max_captures = max(0, int(debug_max_captures))
+        self.debug_capture_count = 0
         self.inference_interval_seconds = max(0.0, self.inference_interval_ms / 1000)
         self.snapshot_interval_seconds = max(0.0, self.snapshot_interval_ms / 1000)
         self.quality_thresholds = quality_thresholds_from_config(
@@ -848,6 +863,8 @@ class RuntimeDetectorService:
 
         self.camera.open()
         self.output_manager.log_startup(self.profile_name, self._startup_details())
+        if self.model_warning:
+            print(f"WARNING: {self.model_warning}", file=sys.stderr, flush=True)
         self._log_startup_faults()
         self.running = True
         self.started_at = datetime.now().isoformat(timespec="seconds")
@@ -898,6 +915,7 @@ class RuntimeDetectorService:
         return {
             "profile": self.profile_name,
             "model_path": str(self.model_path),
+            "model_override_path": self.model_override_path or None,
             "model_format": self.model_format,
             "model_format_requested": self.model_format_requested,
             "prefer_edge_model": self.prefer_edge_model,
@@ -922,6 +940,9 @@ class RuntimeDetectorService:
             "debug_detections": self.debug_detections,
             "save_debug_frames": self.save_debug_frames,
             "debug_frame_limit": self.debug_frame_limit,
+            "debug_capture_on_detection": self.debug_capture_on_detection,
+            "debug_dir": str(self.debug_dir),
+            "debug_max_captures": self.debug_max_captures,
             "image_quality_enabled": self.quality_enabled,
             "quality_thresholds": self.quality_thresholds,
             "skip_inference_on_bad_quality": self.skip_inference_on_bad_quality,
@@ -993,6 +1014,7 @@ class RuntimeDetectorService:
                 "started_at": self.started_at,
                 "profile_name": self.profile_name,
                 "model_path": str(self.model_path),
+                "model_override_path": self.model_override_path or None,
                 "model_status": self.model_status,
                 "model_error": self.model_error,
                 "model_format": self.model_format,
@@ -1032,6 +1054,10 @@ class RuntimeDetectorService:
                 "save_debug_frames": self.save_debug_frames,
                 "debug_frame_limit": self.debug_frame_limit,
                 "debug_frame_count": self.debug_frame_count,
+                "debug_capture_on_detection": self.debug_capture_on_detection,
+                "debug_dir": str(self.debug_dir),
+                "debug_max_captures": self.debug_max_captures,
+                "debug_capture_count": self.debug_capture_count,
                 "review_image_interval_seconds": DEFAULT_REVIEW_IMAGE_INTERVAL_SECONDS,
                 "total_detections": self.total_detections,
                 "total_images_saved": self.total_images_saved,
@@ -1085,6 +1111,7 @@ class RuntimeDetectorService:
                 "model": {
                     "loaded": model_loaded,
                     "path": str(self.model_path),
+                    "override": bool(self.model_override_path),
                     "imgsz": self.imgsz,
                     "format": self.model_format,
                     "warning": self.model_warning or None,
@@ -1247,6 +1274,14 @@ class RuntimeDetectorService:
                 )
                 detection = self._attach_frame_metadata(detection, image_quality, preprocessing_metadata)
                 detection = self._handle_review_images(processed_frame, detection, detections)
+                self._maybe_capture_detection_debug(
+                    raw_frame=frame,
+                    inference_frame=processed_frame,
+                    detections=detections,
+                    detection=detection,
+                    image_quality=image_quality,
+                    preprocessing_metadata=preprocessing_metadata,
+                )
                 self._maybe_write_debug_frame(processed_frame, detections, detection)
                 self._maybe_update_snapshot(processed_frame, detections, detection)
                 self._update_runtime_timing(inference_ms)
@@ -1685,6 +1720,124 @@ class RuntimeDetectorService:
             debug_log = DEBUG_FRAMES_DIR / "detections_debug.jsonl"
             with open(debug_log, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def _maybe_capture_detection_debug(
+        self,
+        raw_frame,
+        inference_frame,
+        detections,
+        detection,
+        image_quality,
+        preprocessing_metadata,
+    ):
+        if not self.debug_capture_on_detection or not detection.get("raw_detected"):
+            return None
+        if self.debug_max_captures and self.debug_capture_count >= self.debug_max_captures:
+            return None
+
+        capture_number = self.debug_capture_count + 1
+        timestamp = datetime.now()
+        capture_dir = self.debug_dir / (
+            f"capture_{capture_number:03d}_{timestamp.strftime('%Y%m%d_%H%M%S_%f')}"
+        )
+        try:
+            capture_dir.mkdir(parents=True, exist_ok=False)
+            raw_path = capture_dir / "raw_camera.png"
+            inference_path = capture_dir / "inference_input.png"
+            inference_array_path = capture_dir / "inference_input.npy"
+            if not cv2.imwrite(str(raw_path), raw_frame):
+                raise RuntimeError(f"Could not encode raw camera frame: {raw_path}")
+            if not cv2.imwrite(str(inference_path), inference_frame):
+                raise RuntimeError(f"Could not encode inference input: {inference_path}")
+
+            import numpy as np
+
+            np.save(inference_array_path, inference_frame, allow_pickle=False)
+            metadata = self._build_detection_debug_metadata(
+                timestamp=timestamp,
+                raw_frame=raw_frame,
+                inference_frame=inference_frame,
+                raw_path=raw_path,
+                inference_path=inference_path,
+                inference_array_path=inference_array_path,
+                detections=detections,
+                detection=detection,
+                image_quality=image_quality,
+                preprocessing_metadata=preprocessing_metadata,
+            )
+            metadata_path = capture_dir / "metadata.json"
+            metadata_path.write_text(
+                json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            self.debug_capture_count = capture_number
+            return metadata_path
+        except Exception as exc:
+            self.last_error = f"Detection debug capture failed: {exc}"
+            return None
+
+    def _build_detection_debug_metadata(
+        self,
+        timestamp,
+        raw_frame,
+        inference_frame,
+        raw_path,
+        inference_path,
+        inference_array_path,
+        detections,
+        detection,
+        image_quality,
+        preprocessing_metadata,
+    ):
+        primary = detections[0] if detections else {}
+        return {
+            "timestamp": timestamp.isoformat(timespec="microseconds"),
+            "profile": self.profile_name,
+            "model_path": str(self.model_path),
+            "model_override_path": self.model_override_path or None,
+            "model_format": self.model_format,
+            "configured_imgsz": self.imgsz,
+            "model_warning": self.model_warning or None,
+            "raw_camera_frame": {
+                "path": str(raw_path),
+                "shape": list(raw_frame.shape),
+                "dtype": str(raw_frame.dtype),
+                "in_memory_color_space": "BGR",
+                "saved_file_color_encoding": "PNG written by OpenCV from BGR array",
+            },
+            "inference_input": {
+                "image_path": str(inference_path),
+                "array_path": str(inference_array_path),
+                "shape": list(inference_frame.shape),
+                "dtype": str(inference_frame.dtype),
+                "in_memory_color_space": "BGR",
+                "engine_boundary": (
+                    "Exact array passed to InferenceEngine.predict before Ultralytics "
+                    "backend preprocessing."
+                ),
+                "image_representation": (
+                    "Lossless PNG; scripts/validate_model.py can use this image directly. "
+                    "The NPY file preserves the exact in-memory array."
+                ),
+            },
+            "preprocessing": self._json_safe(preprocessing_metadata),
+            "image_quality": self._json_safe(image_quality),
+            "raw_detections": self._json_safe(detections),
+            "primary_detection": {
+                "class_id": primary.get("class_id"),
+                "class_name": primary.get("class_name"),
+                "confidence": primary.get("confidence"),
+                "bbox": primary.get("bbox"),
+            },
+            "inspection": {
+                "raw_detected": bool(detection.get("raw_detected")),
+                "stable_detected": bool(detection.get("stable_detected")),
+                "inspection_result": detection.get("inspection_result"),
+                "class_name": detection.get("class_name"),
+                "confidence": detection.get("confidence"),
+                "message": detection.get("result_message"),
+            },
+        }
 
     def _write_image_sidecar(self, image_path, category, detection=None, raw_detections=None):
         detection = detection or {}
@@ -2329,11 +2482,17 @@ def create_app(service):
     return app
 
 
-def main():
+def create_parser():
     parser = argparse.ArgumentParser(description="Raspberry Pi runtime detection service")
     camera_index_env = os.getenv("VISION_CAMERA_INDEX")
     parser.add_argument("--profile", default=os.getenv("VISION_MODEL_PROFILE", ACTIVE_MODEL_PROFILE))
-    parser.add_argument("--model", default=os.getenv("VISION_MODEL_PATH"))
+    parser.add_argument(
+        "--model",
+        "--model-path",
+        dest="model_path",
+        default=os.getenv("VISION_MODEL_PATH"),
+        help="Explicit model file or exported model folder. --model is retained as an alias.",
+    )
     parser.add_argument(
         "--model-format",
         choices=(MODEL_FORMAT_AUTO, MODEL_FORMAT_PT, MODEL_FORMAT_NCNN),
@@ -2444,6 +2603,29 @@ def main():
         default=int(os.getenv("VISION_DEBUG_FRAME_LIMIT", "20")),
         help="Maximum number of debug frames/records to write; 0 means unlimited.",
     )
+    parser.add_argument(
+        "--debug-capture-on-detection",
+        action="store_true",
+        default=os.getenv("VISION_DEBUG_CAPTURE_ON_DETECTION", "").lower()
+        in {"1", "true", "yes", "on"},
+        help="Save raw and exact pre-engine inference frames only when raw detection is true.",
+    )
+    parser.add_argument(
+        "--debug-dir",
+        default=os.getenv("VISION_DEBUG_DIR"),
+        help="Detection capture output directory; defaults to data/debug_frames/live_detections/.",
+    )
+    parser.add_argument(
+        "--debug-max-captures",
+        type=int,
+        default=int(os.getenv("VISION_DEBUG_MAX_CAPTURES", "5")),
+        help="Maximum detection-triggered captures; 0 means unlimited.",
+    )
+    return parser
+
+
+def main():
+    parser = create_parser()
     args = parser.parse_args()
     confidence = (
         args.confidence_threshold_override
@@ -2454,7 +2636,7 @@ def main():
     try:
         service = RuntimeDetectorService(
             profile_name=args.profile,
-            model_path=args.model,
+            model_path=args.model_path,
             model_format=args.model_format,
             prefer_edge_model=args.prefer_edge_model,
             camera_index=args.camera,
@@ -2476,6 +2658,9 @@ def main():
             debug_detections=args.debug_detections,
             save_debug_frames=args.save_debug_frames,
             debug_frame_limit=args.debug_frame_limit,
+            debug_capture_on_detection=args.debug_capture_on_detection,
+            debug_dir=args.debug_dir,
+            debug_max_captures=args.debug_max_captures,
         )
     except Exception as exc:
         print(f"Runtime failed to initialize: {exc}", file=sys.stderr)
