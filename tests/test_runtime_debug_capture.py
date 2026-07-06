@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,11 @@ from unittest import mock
 import numpy as np
 
 import app.runtime.detector_service as detector_service
-from app.runtime.inference_engine import model_input_size_warning, read_model_input_size
+from app.runtime.inference_engine import (
+    ModelInputSizeMismatchError,
+    read_model_input_size,
+    resolve_runtime_input_size,
+)
 
 
 def create_profile(models_dir):
@@ -61,14 +66,27 @@ class RuntimeDebugCaptureTests(unittest.TestCase):
                     profile_name="test_profile",
                     model_path=str(candidate),
                     model_format="auto",
-                    imgsz=256,
                 )
                 status = service.get_status()
+                mismatch_service = detector_service.RuntimeDetectorService(
+                    profile_name="test_profile",
+                    model_path=str(candidate),
+                    model_format="auto",
+                    imgsz=256,
+                    allow_model_input_size_mismatch=True,
+                )
+                mismatch_status = mismatch_service.get_status()
 
             self.assertEqual(service.model_path, candidate)
             self.assertEqual(status["model"]["path"], str(candidate))
             self.assertTrue(status["model"]["override"])
-            self.assertIn("320x320", status["model_warning"])
+            self.assertEqual(status["imgsz"], 320)
+            self.assertEqual(status["input_size_source"], "model_metadata")
+            self.assertEqual(status["model_input_size"], {"width": 320, "height": 320})
+            self.assertFalse(status["model_input_size_mismatch"])
+            self.assertEqual(mismatch_status["runtime_input_size"], {"width": 256, "height": 256})
+            self.assertTrue(mismatch_status["model_input_size_mismatch"])
+            self.assertTrue(mismatch_status["model_input_size_mismatch_allowed"])
 
     def test_debug_capture_disabled_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -124,14 +142,48 @@ class RuntimeDebugCaptureTests(unittest.TestCase):
             self.assertEqual(metadata["primary_detection"]["confidence"], 1.0)
             self.assertTrue(Path(metadata["inference_input"]["image_path"]).is_file())
 
-    def test_ncnn_metadata_size_warning_does_not_change_requested_size(self):
+    def test_ncnn_metadata_size_mismatch_fails_by_default(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             model_dir = Path(tmpdir)
             (model_dir / "metadata.yaml").write_text("imgsz: [320, 320]\n", encoding="utf-8")
             self.assertEqual(read_model_input_size(model_dir), (320, 320))
-            warning = model_input_size_warning(model_dir, 256)
-            self.assertIn("Runtime imgsz 256x256", warning)
-            self.assertIn("exported model input 320x320", warning)
+            with self.assertRaisesRegex(ModelInputSizeMismatchError, "320x320"):
+                resolve_runtime_input_size(
+                    model_dir,
+                    requested_imgsz=256,
+                    model_format="ncnn",
+                )
+
+    def test_explicit_mismatch_escape_hatch_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_dir = Path(tmpdir)
+            (model_dir / "metadata.yaml").write_text("imgsz: [320, 320]\n", encoding="utf-8")
+            resolution = resolve_runtime_input_size(
+                model_dir,
+                requested_imgsz=256,
+                model_format="ncnn",
+                allow_mismatch=True,
+            )
+            self.assertEqual(resolution["runtime_imgsz"], 256)
+            self.assertTrue(resolution["mismatch"])
+            self.assertTrue(resolution["mismatch_allowed"])
+            self.assertIn("MISMATCH ALLOWED", resolution["warning"])
+
+    def test_size_resolution_uses_legacy_fallback_without_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resolution = resolve_runtime_input_size(
+                Path(tmpdir),
+                model_format="ncnn",
+            )
+            self.assertEqual(resolution["runtime_imgsz"], 256)
+            self.assertEqual(resolution["source"], "legacy_fallback")
+
+    def test_explicit_cli_size_has_priority_over_environment(self):
+        with mock.patch.dict(os.environ, {"IMGSZ": "320"}):
+            environment_args = detector_service.create_parser().parse_args([])
+            explicit_args = detector_service.create_parser().parse_args(["--imgsz", "640"])
+        self.assertEqual(environment_args.imgsz, 320)
+        self.assertEqual(explicit_args.imgsz, 640)
 
     @staticmethod
     def _service(tmpdir, debug_dir, enabled):

@@ -12,6 +12,10 @@ class InferenceEngineError(RuntimeError):
     """Raised when the runtime model cannot be selected or loaded."""
 
 
+class ModelInputSizeMismatchError(InferenceEngineError):
+    """Raised when runtime preprocessing conflicts with an exported edge model."""
+
+
 class InferenceEngine:
     """Small adapter around Ultralytics for PT and exported edge model folders."""
 
@@ -177,6 +181,64 @@ def model_input_size_warning(model_path, runtime_imgsz):
         f"model input {expected[0]}x{expected[1]} from {Path(model_path) / 'metadata.yaml'}. "
         "The runtime size was not changed."
     )
+
+
+def resolve_runtime_input_size(
+    model_path,
+    requested_imgsz=None,
+    model_format=MODEL_FORMAT_AUTO,
+    fallback_imgsz=256,
+    allow_mismatch=False,
+):
+    selected_format = infer_model_format(model_path, model_format)
+    expected = read_model_input_size(model_path) if selected_format == MODEL_FORMAT_NCNN else None
+
+    if requested_imgsz is not None:
+        runtime_imgsz = int(requested_imgsz)
+        source = "explicit"
+    elif expected is not None:
+        if expected[0] != expected[1]:
+            raise ModelInputSizeMismatchError(
+                f"NCNN model declares non-square input {expected[0]}x{expected[1]}, but the "
+                "runtime currently accepts one square --imgsz value. Set an explicit size "
+                "only with ALLOW_MODEL_INPUT_SIZE_MISMATCH=1."
+            )
+        runtime_imgsz = expected[0]
+        source = "model_metadata"
+    else:
+        runtime_imgsz = int(fallback_imgsz)
+        source = "legacy_fallback"
+
+    if runtime_imgsz < 1:
+        raise ValueError("Runtime imgsz must be 1 or greater.")
+
+    runtime_size = (runtime_imgsz, runtime_imgsz)
+    mismatch = expected is not None and expected != runtime_size
+    warning = ""
+    if mismatch:
+        message = (
+            f"Runtime input {runtime_size[0]}x{runtime_size[1]} conflicts with NCNN model "
+            f"input {expected[0]}x{expected[1]} declared by "
+            f"{Path(model_path) / 'metadata.yaml'}."
+        )
+        if not allow_mismatch:
+            raise ModelInputSizeMismatchError(
+                f"{message} Use the model size or set "
+                "ALLOW_MODEL_INPUT_SIZE_MISMATCH=1 to accept this risk explicitly."
+            )
+        warning = f"MODEL INPUT SIZE MISMATCH ALLOWED: {message}"
+
+    return {
+        "runtime_imgsz": runtime_imgsz,
+        "runtime_size": {"width": runtime_size[0], "height": runtime_size[1]},
+        "model_size": (
+            {"width": expected[0], "height": expected[1]} if expected is not None else None
+        ),
+        "source": source,
+        "mismatch": mismatch,
+        "mismatch_allowed": bool(mismatch and allow_mismatch),
+        "warning": warning,
+    }
 
 
 def extract_detections(results):

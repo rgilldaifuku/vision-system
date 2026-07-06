@@ -34,7 +34,7 @@ from app.runtime.inference_engine import (
     MODEL_FORMAT_AUTO,
     MODEL_FORMAT_NCNN,
     MODEL_FORMAT_PT,
-    model_input_size_warning,
+    resolve_runtime_input_size,
     resolve_model_path,
 )
 from app.runtime.image_quality import (
@@ -54,7 +54,7 @@ BOX_COLORS = {
     "target": (24, 178, 107),
     "other": (240, 180, 41),
 }
-DEFAULT_IMGSZ = 320
+DEFAULT_IMGSZ = 256
 DEFAULT_FRAME_WIDTH = 640
 DEFAULT_FRAME_HEIGHT = 480
 DEFAULT_INFERENCE_INTERVAL_MS = 200
@@ -678,7 +678,8 @@ class RuntimeDetectorService:
         confidence=None,
         detection_required_frames=3,
         miss_required_frames=3,
-        imgsz=DEFAULT_IMGSZ,
+        imgsz=None,
+        allow_model_input_size_mismatch=False,
         frame_width=None,
         frame_height=None,
         inference_interval_ms=DEFAULT_INFERENCE_INTERVAL_MS,
@@ -765,8 +766,16 @@ class RuntimeDetectorService:
             detection_required_frames=detection_required_frames,
             miss_required_frames=miss_required_frames,
         )
-        self.imgsz = max(1, int(imgsz))
-        size_warning = model_input_size_warning(self.model_path, self.imgsz)
+        self.model_input_resolution = resolve_runtime_input_size(
+            self.model_path,
+            requested_imgsz=imgsz,
+            model_format=self.model_format,
+            fallback_imgsz=DEFAULT_IMGSZ,
+            allow_mismatch=allow_model_input_size_mismatch,
+        )
+        self.imgsz = self.model_input_resolution["runtime_imgsz"]
+        self.allow_model_input_size_mismatch = bool(allow_model_input_size_mismatch)
+        size_warning = self.model_input_resolution["warning"]
         if size_warning:
             self.model_warning = " ".join(
                 warning for warning in (self.model_warning, size_warning) if warning
@@ -935,6 +944,13 @@ class RuntimeDetectorService:
             "frame_width": self.frame_width,
             "frame_height": self.frame_height,
             "imgsz": self.imgsz,
+            "model_input_size": self.model_input_resolution["model_size"],
+            "runtime_input_size": self.model_input_resolution["runtime_size"],
+            "input_size_source": self.model_input_resolution["source"],
+            "model_input_size_mismatch": self.model_input_resolution["mismatch"],
+            "model_input_size_mismatch_allowed": self.model_input_resolution[
+                "mismatch_allowed"
+            ],
             "inference_interval_ms": self.inference_interval_ms,
             "snapshot_enabled": self.enable_snapshot,
             "debug_detections": self.debug_detections,
@@ -1046,6 +1062,13 @@ class RuntimeDetectorService:
                 "frame_width": self.frame_width,
                 "frame_height": self.frame_height,
                 "imgsz": self.imgsz,
+                "model_input_size": self.model_input_resolution["model_size"],
+                "runtime_input_size": self.model_input_resolution["runtime_size"],
+                "input_size_source": self.model_input_resolution["source"],
+                "model_input_size_mismatch": self.model_input_resolution["mismatch"],
+                "model_input_size_mismatch_allowed": self.model_input_resolution[
+                    "mismatch_allowed"
+                ],
                 "inference_interval_ms": self.inference_interval_ms,
                 "snapshot_interval_ms": self.snapshot_interval_ms,
                 "snapshot_enabled": self.enable_snapshot,
@@ -1113,6 +1136,13 @@ class RuntimeDetectorService:
                     "path": str(self.model_path),
                     "override": bool(self.model_override_path),
                     "imgsz": self.imgsz,
+                    "expected_input_size": self.model_input_resolution["model_size"],
+                    "runtime_input_size": self.model_input_resolution["runtime_size"],
+                    "input_size_source": self.model_input_resolution["source"],
+                    "input_size_mismatch": self.model_input_resolution["mismatch"],
+                    "input_size_mismatch_allowed": self.model_input_resolution[
+                        "mismatch_allowed"
+                    ],
                     "format": self.model_format,
                     "warning": self.model_warning or None,
                     "error": self.model_error or None,
@@ -1797,6 +1827,13 @@ class RuntimeDetectorService:
             "model_override_path": self.model_override_path or None,
             "model_format": self.model_format,
             "configured_imgsz": self.imgsz,
+            "model_input_size": self.model_input_resolution["model_size"],
+            "runtime_input_size": self.model_input_resolution["runtime_size"],
+            "input_size_source": self.model_input_resolution["source"],
+            "model_input_size_mismatch": self.model_input_resolution["mismatch"],
+            "model_input_size_mismatch_allowed": self.model_input_resolution[
+                "mismatch_allowed"
+            ],
             "model_warning": self.model_warning or None,
             "raw_camera_frame": {
                 "path": str(raw_path),
@@ -2485,6 +2522,7 @@ def create_app(service):
 def create_parser():
     parser = argparse.ArgumentParser(description="Raspberry Pi runtime detection service")
     camera_index_env = os.getenv("VISION_CAMERA_INDEX")
+    imgsz_env = os.getenv("IMGSZ") or os.getenv("VISION_IMGSZ")
     parser.add_argument("--profile", default=os.getenv("VISION_MODEL_PROFILE", ACTIVE_MODEL_PROFILE))
     parser.add_argument(
         "--model",
@@ -2559,7 +2597,27 @@ def create_parser():
     )
     parser.add_argument("--detection-required-frames", type=int, default=3)
     parser.add_argument("--miss-required-frames", type=int, default=3)
-    parser.add_argument("--imgsz", type=int, default=int(os.getenv("VISION_IMGSZ", DEFAULT_IMGSZ)))
+    parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=int(imgsz_env) if imgsz_env else None,
+        help=(
+            "Inference input size. If omitted, NCNN metadata is used; otherwise the "
+            f"legacy fallback is {DEFAULT_IMGSZ}."
+        ),
+    )
+    parser.add_argument(
+        "--allow-model-input-size-mismatch",
+        action="store_true",
+        default=(
+            os.getenv(
+                "ALLOW_MODEL_INPUT_SIZE_MISMATCH",
+                os.getenv("VISION_ALLOW_MODEL_INPUT_SIZE_MISMATCH", ""),
+            ).lower()
+            in {"1", "true", "yes", "on"}
+        ),
+        help="Allow an explicit --imgsz that conflicts with NCNN metadata.",
+    )
     parser.add_argument(
         "--frame-width",
         type=int,
@@ -2650,6 +2708,7 @@ def main():
             detection_required_frames=args.detection_required_frames,
             miss_required_frames=args.miss_required_frames,
             imgsz=args.imgsz,
+            allow_model_input_size_mismatch=args.allow_model_input_size_mismatch,
             frame_width=args.frame_width,
             frame_height=args.frame_height,
             inference_interval_ms=args.inference_interval_ms,
