@@ -91,11 +91,12 @@ python -m app.runtime.detector_service \
   --model-format auto \
   --host 0.0.0.0 \
   --port 8000 \
-  --imgsz 256 \
   --frame-width 640 \
   --frame-height 480 \
   --inference-interval-ms 300
 ```
+
+Do not pass `--imgsz` unless you intentionally need an override. The runtime resolves NCNN input size from `metadata.yaml` first, then falls back to the legacy 256 only when metadata is unavailable.
 
 ## Model Format On Raspberry Pi
 
@@ -172,6 +173,24 @@ python scripts/validate_runtime.py \
 ```
 
 The dashboard and `/status` expose `image_quality`, `preprocessing`, and camera-profile details. Review/debug/model-test images also get `.json` sidecars for retraining evidence.
+
+## Inspection Events And Notifications
+
+The runtime keeps the existing `inspection_result` values and also exposes canonical `inspection_state` values for integrations: `PASS`, `FAIL`, `REVIEW`, `NO_PART`, and `SYSTEM_ERROR`. Each finalized decision has an `inspection_id`.
+
+Structured events are written to:
+
+```text
+data/logs/events.jsonl
+```
+
+External notifications are disabled by default. For a safe dry configuration test, set only:
+
+```bash
+VISION_NOTIFICATIONS_ENABLED=1 python -m app.runtime.detector_service --profile yellow_daifuku --camera-source samples/test.jpg --dry-run --host 127.0.0.1 --port 8000
+```
+
+With no email or Teams credentials configured, the runtime reports missing credentials without sending anything or crashing. Configure real notification targets only with environment variables, never by committing secrets.
 
 ## Capture Raw Dataset Images
 

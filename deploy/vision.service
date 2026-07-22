@@ -22,7 +22,7 @@ Environment=PYTHONUNBUFFERED=1
 # Bench simulation only:
 # Environment=VISION_CAMERA_SOURCE=/home/pi/vision-system/samples/test.jpg
 # Environment=VISION_DRY_RUN=true
-ExecStart=/home/pi/vision-system/.venv/bin/python -m app.runtime.detector_service --profile yellow_daifuku --camera-backend picamera2 --host 0.0.0.0 --port 8000 --imgsz 256 --frame-width 640 --frame-height 480 --inference-interval-ms 300
+ExecStart=/home/pi/vision-system/.venv/bin/python -m app.runtime.detector_service --profile yellow_daifuku --camera-profile pi_camera3 --camera-backend picamera2 --prefer-edge-model --model-format auto --host 0.0.0.0 --port 8000 --frame-width 640 --frame-height 480 --inference-interval-ms 300
 
 Restart=always
 RestartSec=5

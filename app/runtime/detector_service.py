@@ -46,6 +46,10 @@ from app.runtime.image_quality import (
 from app.runtime.inspection_logic import InspectionLogic, normalize_class_name
 from app.runtime.preprocessing import apply_camera_transforms, apply_roi, standardize_frame
 from app.runtime.action_manager import ActionManager
+from app.runtime.event_manager import DuplicateSuppressor, EventSeverity, EventManager
+from app.runtime.health_monitor import HealthMonitor
+from app.runtime.inspection_result import canonical_state_from_result, generate_inspection_id
+from app.runtime.notification_manager import NotificationManager
 from app.runtime.output_manager import OutputManager
 from app.runtime.picamera2_manager import Picamera2CameraManager
 
@@ -61,6 +65,7 @@ DEFAULT_INFERENCE_INTERVAL_MS = 200
 DEFAULT_SNAPSHOT_INTERVAL_MS = 1000
 DEFAULT_REVIEW_IMAGE_INTERVAL_SECONDS = 5.0
 DEBUG_FRAMES_DIR = DATA_DIR / "debug_frames"
+INSPECTIONS_DIR = DATA_DIR / "inspections"
 PROFILE_CONFIGS_DIR = PROJECT_ROOT / "profiles"
 MODEL_STATUS_LOADED = "Loaded"
 MODEL_STATUS_ERROR = "Error"
@@ -364,6 +369,22 @@ DASHBOARD_HTML = """
         <div id="result-message" class="value">--</div>
       </div>
       <div class="detail">
+        <div class="label">Inspection ID</div>
+        <div id="inspection-id" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Canonical State</div>
+        <div id="inspection-state" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">Agreement</div>
+        <div id="agreement-ratio" class="value">--</div>
+      </div>
+      <div class="detail">
+        <div class="label">System Health</div>
+        <div id="health-status" class="badge warn">--</div>
+      </div>
+      <div class="detail">
         <div class="label">Timestamp</div>
         <div id="timestamp" class="value">--</div>
       </div>
@@ -441,6 +462,11 @@ DASHBOARD_HTML = """
       <div class="label">Active Profile / Model</div>
       <div id="profile-name" class="value">--</div>
       <div id="model-path" class="model-path">--</div>
+    </section>
+
+    <section class="status-card">
+      <div class="label">Recent Events</div>
+      <div id="recent-events" class="model-path">--</div>
     </section>
   </main>
 
@@ -548,6 +574,25 @@ DASHBOARD_HTML = """
       return "bad";
     }
 
+    function healthState(status) {
+      if (status === "HEALTHY") {
+        return "ok";
+      }
+      if (status === "DEGRADED") {
+        return "warn";
+      }
+      return "bad";
+    }
+
+    function formatEvents(events) {
+      if (!events || !events.length) {
+        return "--";
+      }
+      return events.slice(-10).map(function(event) {
+        return event.timestamp + " " + event.severity + " " + event.event_type + ": " + event.message;
+      }).join("\\n");
+    }
+
     function refreshSnapshot() {
       if (!SNAPSHOT_ENABLED) {
         return;
@@ -598,6 +643,11 @@ DASHBOARD_HTML = """
         setText("model-status", modelText);
         setText("confidence", formatConfidence(latest.confidence));
         setText("result-message", latest.result_message || "--");
+        setText("inspection-id", latest.inspection_id || (status.inspection && status.inspection.inspection_id) || "--");
+        setText("inspection-state", latest.inspection_state || (status.inspection && status.inspection.state) || "--");
+        setText("agreement-ratio", formatNumber(latest.agreement_ratio || (status.inspection && status.inspection.agreement_ratio), 2, ""));
+        setText("health-status", (status.health && status.health.status) || status.health_status || "--");
+        setBoxState("health-status", healthState((status.health && status.health.status) || status.health_status));
         setText("timestamp", latest.timestamp || "--");
         setText("camera-fps", formatNumber(status.camera_fps, 1, ""));
         setText("camera-backend", status.camera_backend || (status.camera && status.camera.backend) || "--");
@@ -632,6 +682,7 @@ DASHBOARD_HTML = """
         setText("preprocessing-status", preprocessing.preprocessing_enabled ? "Enabled" : "Disabled");
         setText("profile-name", status.profile_name || latest.profile_name || "--");
         setText("model-path", status.model_path || latest.model_path || "--");
+        setText("recent-events", formatEvents(status.recent_events || []));
         setText("browser-updated", new Date().toLocaleTimeString());
       } catch (error) {
         setText("camera-status", "API Error");
@@ -832,6 +883,17 @@ class RuntimeDetectorService:
         )
         self.output_manager = OutputManager()
         self.action_manager = ActionManager(self.profile_config.get("actions") or {})
+        self.event_manager = EventManager()
+        self.notification_manager = NotificationManager()
+        self.health_monitor = HealthMonitor()
+        notification_rules = self.profile_config.get("notifications") or {}
+        self.repeated_failure_suppressor = DuplicateSuppressor(
+            cooldown_seconds=float(notification_rules.get("cooldown_seconds", 60.0)),
+            repeat_threshold=int(notification_rules.get("failure_repeat_threshold", 3)),
+            repeat_window_seconds=float(notification_rules.get("failure_window_seconds", 300.0)),
+        )
+        self.evidence_config = self.profile_config.get("evidence") or {}
+        self.last_structured_event_identity = None
 
         self.running = False
         self.camera_thread = None
@@ -864,6 +926,11 @@ class RuntimeDetectorService:
             "detections": 0.0,
             "low_confidence": 0.0,
             "no_detection": 0.0,
+            "evidence_pass": 0.0,
+            "evidence_fail": 0.0,
+            "evidence_review": 0.0,
+            "evidence_no_part": 0.0,
+            "evidence_system_error": 0.0,
         }
 
     def start(self):
@@ -872,6 +939,13 @@ class RuntimeDetectorService:
 
         self.camera.open()
         self.output_manager.log_startup(self.profile_name, self._startup_details())
+        self.event_manager.record(
+            "RUNTIME_STARTED",
+            severity=EventSeverity.INFO,
+            profile=self.profile_name,
+            message="Runtime service starting.",
+            details=self._startup_details(),
+        )
         if self.model_warning:
             print(f"WARNING: {self.model_warning}", file=sys.stderr, flush=True)
         self._log_startup_faults()
@@ -888,6 +962,13 @@ class RuntimeDetectorService:
             if thread is not None:
                 thread.join(timeout=2.0)
         self.camera.release()
+        self.event_manager.record(
+            "RUNTIME_STOPPING",
+            severity=EventSeverity.INFO,
+            profile=self.profile_name,
+            message="Runtime service stopping.",
+        )
+        self.event_manager.stop()
 
     def _create_camera(self, camera_index, camera_source, camera_backend):
         if camera_source:
@@ -995,8 +1076,10 @@ class RuntimeDetectorService:
         return {
             "pass": action_counters.get("pass", 0),
             "fail": action_counters.get("fail", 0),
+            "review": action_counters.get("review", 0),
             "low_confidence": action_counters.get("low_confidence", 0),
             "no_part": action_counters.get("no_part", 0),
+            "system_error": action_counters.get("system_error", 0),
             "camera_error": action_counters.get("camera_error", 0),
             "model_error": action_counters.get("model_error", 0),
             "simulation": action_counters.get("simulation", 0),
@@ -1025,6 +1108,19 @@ class RuntimeDetectorService:
             image_quality = dict(self.latest_image_quality)
             preprocessing = dict(self.latest_preprocessing)
             camera_profile_payload = self.camera_profile.to_dict() if self.camera_profile else None
+            notification_status = self.notification_manager.status()
+            health = self.health_monitor.snapshot(
+                camera_connected=camera_connected,
+                model_loaded=model_loaded,
+                inference_disabled=self.inference_disabled,
+                latest_frame_time=self.last_camera_frame_time,
+                last_inference_time=self.last_inference_time,
+                inference_latency_ms=self.last_inference_ms,
+                image_quality_status=image_quality.get("quality_status"),
+                notification_status=notification_status,
+                data_path=DATA_DIR,
+            )
+            event_snapshot = self.event_manager.snapshot()
             return {
                 "running": self.running,
                 "started_at": self.started_at,
@@ -1095,6 +1191,11 @@ class RuntimeDetectorService:
                 "active_class": latest.get("active_class") or latest.get("class_name"),
                 "latest_detection": latest,
                 "output_payload": output_payload,
+                "health_status": health["status"],
+                "health": health,
+                "events": event_snapshot,
+                "recent_events": event_snapshot["recent"],
+                "notifications": notification_status,
                 "image_quality": image_quality,
                 "preprocessing": preprocessing,
                 "runtime": {
@@ -1150,10 +1251,17 @@ class RuntimeDetectorService:
                     "inference_disabled": self.inference_disabled,
                 },
                 "inspection": {
+                    "inspection_id": latest.get("inspection_id"),
+                    "state": latest.get("inspection_state")
+                    or canonical_state_from_result(latest.get("inspection_result")).value,
+                    "legacy_result": latest.get("inspection_result"),
                     "result": latest.get("inspection_result"),
                     "message": latest.get("result_message"),
                     "active_class": latest.get("active_class") or latest.get("class_name"),
                     "confidence": latest.get("confidence"),
+                    "average_confidence": latest.get("average_confidence"),
+                    "agreement_ratio": latest.get("agreement_ratio"),
+                    "image_quality_status": image_quality.get("quality_status"),
                     "raw_detection": latest.get("raw_detected"),
                     "stable_detection": latest.get("stable_detected"),
                     "saved_image_path": latest.get("saved_image_path") or None,
@@ -1435,6 +1543,8 @@ class RuntimeDetectorService:
         )
         return {
             "inspection_result": result,
+            "inspection_id": generate_inspection_id(),
+            "inspection_state": canonical_state_from_result(result).value,
             "pass_fail_bool": False,
             "result_message": message,
             "stable_detected": False,
@@ -1463,13 +1573,24 @@ class RuntimeDetectorService:
     @staticmethod
     def _attach_frame_metadata(detection, image_quality, preprocessing_metadata):
         detection = dict(detection)
+        detection.setdefault("inspection_id", generate_inspection_id())
+        detection.setdefault(
+            "inspection_state",
+            canonical_state_from_result(detection.get("inspection_result")).value,
+        )
         detection["image_quality"] = image_quality or {}
         detection["preprocessing"] = preprocessing_metadata or {}
         return detection
 
     def _handle_actions(self, detection, output_payload):
         status_document = self._build_latest_status_document(detection, output_payload)
-        return self.action_manager.handle(status_document)
+        action_result = self.action_manager.handle(status_document)
+        event = self._record_structured_event(status_document)
+        if event:
+            action_result = dict(action_result)
+            action_result["event_id"] = event.event_id
+            output_payload["event_id"] = event.event_id
+        return action_result
 
     def _build_latest_status_document(self, detection, output_payload):
         camera_backend = getattr(self.camera, "backend", self.camera_backend_requested)
@@ -1490,6 +1611,9 @@ class RuntimeDetectorService:
             "model_error": self.model_error or None,
             "camera_profile": self.camera_profile_name or None,
             "inspection_result": detection.get("inspection_result", "NO_PART"),
+            "inspection_id": detection.get("inspection_id"),
+            "inspection_state": detection.get("inspection_state")
+            or canonical_state_from_result(detection.get("inspection_result")).value,
             "pass_fail_bool": detection.get("pass_fail_bool"),
             "active_class": detection.get("active_class") or detection.get("class_name"),
             "confidence": detection.get("confidence"),
@@ -1503,6 +1627,63 @@ class RuntimeDetectorService:
             "preprocessing": detection.get("preprocessing") or self.latest_preprocessing,
             "output_payload": output_payload,
         }
+
+    def _record_structured_event(self, status_document):
+        inspection_id = status_document.get("inspection_id")
+        result = status_document.get("inspection_result", "NO_PART")
+        identity = (inspection_id, result)
+        if identity == self.last_structured_event_identity:
+            return None
+
+        self.last_structured_event_identity = identity
+        event_type, severity = self._event_type_for_result(result)
+        event = self.event_manager.record(
+            event_type,
+            severity=severity,
+            profile=self.profile_name,
+            inspection_id=inspection_id,
+            message=status_document.get("message", ""),
+            details={
+                "inspection_state": status_document.get("inspection_state"),
+                "inspection_result": result,
+                "active_class": status_document.get("active_class"),
+                "confidence": status_document.get("confidence"),
+                "camera_status": status_document.get("camera_status"),
+                "model_status": status_document.get("model_status"),
+                "runtime_mode": status_document.get("runtime_mode"),
+            },
+            image_path=status_document.get("saved_image_path"),
+        )
+
+        if severity == EventSeverity.CRITICAL:
+            self.notification_manager.notify(event)
+
+        if result == "FAIL" and self.repeated_failure_suppressor.repeated("fail"):
+            repeated = self.event_manager.record(
+                "REPEATED_FAILURES",
+                severity=EventSeverity.WARNING,
+                profile=self.profile_name,
+                inspection_id=inspection_id,
+                message="Repeated finalized inspection failures observed.",
+                details={"source_event_id": event.event_id},
+                image_path=status_document.get("saved_image_path"),
+            )
+            self.notification_manager.notify(repeated)
+
+        return event
+
+    @staticmethod
+    def _event_type_for_result(result):
+        result = str(result or "NO_PART").upper()
+        if result == "PASS":
+            return "INSPECTION_PASSED", EventSeverity.INFO
+        if result == "FAIL":
+            return "INSPECTION_FAILED", EventSeverity.WARNING
+        if result == "NO_PART":
+            return "NO_PART_DETECTED", EventSeverity.INFO
+        if result in {"CAMERA_ERROR", "MODEL_ERROR", "SYSTEM_ERROR"}:
+            return result, EventSeverity.CRITICAL
+        return "INSPECTION_REVIEW_REQUIRED", EventSeverity.WARNING
 
     def _update_latest(self, detection, output_payload=None):
         latest = {
@@ -1526,6 +1707,7 @@ class RuntimeDetectorService:
             "simulation_mode": self.simulation_mode,
             "camera_status": self.camera.status,
             "saved_image_path": detection.get("saved_image_path", ""),
+            "event_id": (output_payload or {}).get("event_id"),
             "image_quality": detection.get("image_quality") or dict(self.latest_image_quality),
             "preprocessing": detection.get("preprocessing") or dict(self.latest_preprocessing),
         }
@@ -1611,6 +1793,10 @@ class RuntimeDetectorService:
         ):
             saved_paths.append(self._save_review_image(frame, "no_detection", detection, raw_detections))
 
+        evidence_path = self._save_inspection_evidence(frame, detection, raw_detections)
+        if evidence_path:
+            saved_paths.append(evidence_path)
+
         saved_paths = [str(path) for path in saved_paths if path]
         if saved_paths:
             detection["saved_image_path"] = saved_paths[-1]
@@ -1684,6 +1870,59 @@ class RuntimeDetectorService:
 
         self.last_review_image_times[category] = now
         return True
+
+    def _save_inspection_evidence(self, frame, detection, raw_detections=None):
+        canonical_state = (
+            detection.get("inspection_state")
+            or canonical_state_from_result(detection.get("inspection_result")).value
+        )
+        category = str(canonical_state).lower()
+        if not self._evidence_enabled(category):
+            return None
+
+        cooldown_key = f"evidence_{category}"
+        if not self._review_image_due(cooldown_key):
+            return None
+
+        timestamp = datetime.now()
+        inspection_id = detection.get("inspection_id") or timestamp.strftime("INS-%Y%m%d-%H%M%S")
+        output_dir = INSPECTIONS_DIR / timestamp.strftime("%Y-%m-%d") / category
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{self._safe_filename_part(inspection_id)}.jpg"
+
+        try:
+            if not cv2.imwrite(str(output_path), frame):
+                return None
+            self._write_image_sidecar(
+                output_path,
+                f"inspection_{category}",
+                detection=detection,
+                raw_detections=raw_detections or [],
+            )
+            with self.lock:
+                self.total_images_saved += 1
+            return output_path
+        except Exception as exc:
+            self.last_error = f"Could not save inspection evidence {output_path}: {exc}"
+            return None
+
+    def _evidence_enabled(self, category):
+        defaults = {
+            "pass": False,
+            "fail": False,
+            "review": False,
+            "no_part": False,
+            "system_error": False,
+        }
+        config = self.evidence_config
+        if isinstance(config, dict):
+            by_state = config.get("save_by_state") or config.get("by_state") or {}
+            if isinstance(by_state, dict) and category in by_state:
+                return self._as_bool(by_state[category])
+            key = f"save_{category}"
+            if key in config:
+                return self._as_bool(config[key])
+        return defaults.get(category, False)
 
     def _maybe_write_debug_frame(self, frame, detections, detection):
         if not self.debug_detections and not self.save_debug_frames:
@@ -1883,6 +2122,9 @@ class RuntimeDetectorService:
         sidecar_path = Path(image_path).with_suffix(".json")
         metadata = {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "inspection_id": detection.get("inspection_id"),
+            "inspection_state": detection.get("inspection_state")
+            or canonical_state_from_result(detection.get("inspection_result")).value,
             "profile": self.profile_name,
             "camera_profile": self.camera_profile_name or None,
             "model_path": str(self.model_path),
@@ -1893,6 +2135,8 @@ class RuntimeDetectorService:
             "raw_detections": self._json_safe(raw_detections or []),
             "stable_detection": detection.get("stable_detected"),
             "confidence": detection.get("confidence"),
+            "average_confidence": detection.get("average_confidence"),
+            "agreement_ratio": detection.get("agreement_ratio"),
             "class_name": detection.get("class_name"),
             "image_quality": self._json_safe(image_quality),
             "preprocessing": self._json_safe(preprocessing),
@@ -2057,6 +2301,8 @@ class RuntimeDetectorService:
 
         return {
             "inspection_result": result,
+            "inspection_id": generate_inspection_id(),
+            "inspection_state": canonical_state_from_result(result).value,
             "pass_fail_bool": None,
             "result_message": message,
             "stable_detected": False,
@@ -2296,6 +2542,26 @@ class RuntimeDetectorService:
                     "roi.y2",
                 ),
                 "allow_simulation": self._as_bool(inspection_config.get("allow_simulation", True)),
+                "decision_mode": str(inspection_config.get("decision_mode", "consecutive")),
+                "rolling_window_size": self._as_positive_int(
+                    inspection_config.get("rolling_window_size", 8),
+                    "rolling_window_size",
+                ),
+                "rolling_min_agreeing": self._as_positive_int(
+                    inspection_config.get("rolling_min_agreeing", 6),
+                    "rolling_min_agreeing",
+                ),
+                "rolling_min_agreement_ratio": self._as_float(
+                    inspection_config.get("rolling_min_agreement_ratio", 0.75),
+                    "rolling_min_agreement_ratio",
+                ),
+                "rolling_min_average_confidence": self._as_float(
+                    inspection_config.get(
+                        "rolling_min_average_confidence",
+                        inspection_config.get("minimum_confidence", self.confidence),
+                    ),
+                    "rolling_min_average_confidence",
+                ),
             }
         except (TypeError, ValueError) as exc:
             raise ProfileConfigError(
@@ -2500,6 +2766,10 @@ def create_app(service):
     @app.get("/latest_detection")
     def latest_detection():
         return jsonify(service.get_latest_detection())
+
+    @app.get("/health")
+    def health():
+        return jsonify(service.get_status().get("health", {}))
 
     @app.get("/snapshot.jpg")
     def snapshot():

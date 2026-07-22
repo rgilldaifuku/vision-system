@@ -16,6 +16,7 @@ runs/
 data/runs/
 data/logs/
 data/review_images/
+data/inspections/
 data/debug_frames/
 data/collections/
 data/calibration/

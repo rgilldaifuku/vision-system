@@ -9,6 +9,7 @@ from app.logging import log_runtime_event
 DEFAULT_ACTIONS = {
     "PASS": ["log_event", "write_latest_status_json", "increment_counter"],
     "FAIL": ["log_event", "save_review_image", "write_latest_status_json", "increment_counter"],
+    "REVIEW": ["log_event", "save_review_image", "write_latest_status_json", "increment_counter"],
     "LOW_CONFIDENCE": [
         "log_event",
         "save_review_image",
@@ -18,6 +19,7 @@ DEFAULT_ACTIONS = {
     "NO_PART": ["log_event", "save_review_image", "write_latest_status_json", "increment_counter"],
     "CAMERA_ERROR": ["log_event", "write_latest_status_json", "increment_counter"],
     "MODEL_ERROR": ["log_event", "write_latest_status_json", "increment_counter"],
+    "SYSTEM_ERROR": ["log_event", "write_latest_status_json", "increment_counter"],
     "SIMULATION": ["log_event", "write_latest_status_json"],
     "CAMERA_ONLY": ["log_event", "write_latest_status_json"],
     "INFERENCE_DISABLED": ["log_event", "write_latest_status_json"],
@@ -44,8 +46,10 @@ class ActionManager:
         self.counters = {
             "pass": 0,
             "fail": 0,
+            "review": 0,
             "low_confidence": 0,
             "no_part": 0,
+            "system_error": 0,
             "camera_error": 0,
             "model_error": 0,
             "simulation": 0,

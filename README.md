@@ -189,11 +189,12 @@ python -m app.runtime.detector_service \
   --model-format auto \
   --host 0.0.0.0 \
   --port 8000 \
-  --imgsz 256 \
   --frame-width 640 \
   --frame-height 480 \
   --inference-interval-ms 300
 ```
+
+When `--imgsz` is omitted, exported NCNN model metadata is used first. That prevents a Pi launcher from silently running a 320x320 model at a mismatched legacy size.
 
 Camera-only dashboard for validating the camera, focus, lighting, and dashboard without loading YOLO/PyTorch/NCNN:
 
@@ -225,10 +226,12 @@ The runtime:
 - Computes image quality metrics before inference so lighting/focus/setup problems are visible.
 - Runs YOLO on a throttled interval, not every camera frame.
 - Maintains stable detection state.
+- Converts raw model output into a canonical inspection state: `PASS`, `FAIL`, `REVIEW`, `NO_PART`, or `SYSTEM_ERROR`.
 - Reconnects the camera after failures.
 - Exposes JSON APIs for HMI/supervisor integration.
 - Logs structured detection events to `data/logs/detections.csv`.
 - Logs startup configuration and major runtime faults to `data/logs/runtime_events.csv`.
+- Logs structured inspection/system events to `data/logs/events.jsonl`.
 - Saves rate-limited review images for retraining.
 
 ### Snapshot Mode
@@ -247,6 +250,7 @@ Leave snapshot mode **off** for production/HMI use. When disabled, the dashboard
 - `GET /status` - service status, camera/model health, inspection result, timings, counters, runtime config, and output payload.
 - `GET /latest_detection` - most recent inspection result plus raw/stable detection detail and saved image path.
 - `GET /snapshot.jpg` - latest cached annotated JPEG only when `--enable-snapshot` is enabled.
+- `GET /health` - lightweight health summary derived from cached runtime state.
 
 ## Inspection Result Logic
 
@@ -270,6 +274,42 @@ Current result states:
 - `IMAGE_QUALITY_ERROR` - image quality failed and the active camera profile is configured to skip inference on bad quality.
 - `QUALITY_CHECK_ERROR` - image quality analysis failed unexpectedly.
 
+The runtime also exposes a canonical `inspection_state` for downstream integrations:
+
+- `PASS` - acceptable finalized inspection.
+- `FAIL` - unacceptable finalized inspection.
+- `REVIEW` - low confidence, simulation, camera-only, disabled inference, image-quality warning, or conflicting evidence.
+- `NO_PART` - no part detected after the configured miss threshold.
+- `SYSTEM_ERROR` - camera/model/runtime fault.
+
+Every finalized decision gets a readable `inspection_id` such as `INS-20260722-073142-000184`. Existing `inspection_result` values are preserved for backward compatibility.
+
+Decision mode defaults to the existing consecutive-frame behavior. Profiles may opt into rolling-window decisions:
+
+```yaml
+inspection:
+  decision_mode: rolling_window
+  rolling_window_size: 8
+  rolling_min_agreeing: 6
+  rolling_min_agreement_ratio: 0.75
+```
+
+External notifications are disabled by default. Optional test/staging values are read from environment variables:
+
+```text
+VISION_NOTIFICATIONS_ENABLED
+VISION_EMAIL_ENABLED
+VISION_SMTP_HOST
+VISION_SMTP_PORT
+VISION_SMTP_USERNAME
+VISION_SMTP_PASSWORD
+VISION_EMAIL_FROM
+VISION_EMAIL_TO
+VISION_TEAMS_WEBHOOK_URL
+```
+
+Do not store real credentials in the repo. Missing credentials are reported without stopping the runtime.
+
 ## Image Quality And Preprocessing
 
 Most industrial vision failures come from lighting, focus, camera position, reflections, dirty lenses, weak datasets, or ROI mismatch. Phase 2 adds lightweight diagnostics for those setup issues.
@@ -287,6 +327,10 @@ Runtime `/status` now includes:
 - `image_quality`
 - `preprocessing`
 - `camera_profile_details`
+- `inspection`
+- `health`
+- `events`
+- `notifications`
 
 Review/debug/model-test images get a matching `.json` sidecar with model/profile, detections, image quality, preprocessing, ROI, and result metadata. These sidecars make the retraining loop easier: collect evidence, label hard cases, retrain on desktop, export NCNN, redeploy to Pi.
 
@@ -331,7 +375,17 @@ inspection:
     y2: 1.0
 ```
 
-The output payload prepared by `app/runtime/output_manager.py` includes `inspection_result`, `pass_fail_bool`, `active_class`, `confidence`, `timestamp`, `profile`, `camera_status`, `model_status`, `simulation_mode`, and a human-readable message. A future PLC/HMI adapter should consume this payload instead of raw YOLO class names.
+The output payload prepared by `app/runtime/output_manager.py` includes `inspection_id`, `inspection_state`, `inspection_result`, `pass_fail_bool`, `active_class`, `confidence`, `average_confidence`, `agreement_ratio`, `image_quality_status`, `timestamp`, `profile`, `camera_status`, `model_status`, `simulation_mode`, and a human-readable message. A future PLC/HMI adapter should consume this payload instead of raw YOLO class names.
+
+Optional inspection evidence images can be enabled under:
+
+```text
+data/inspections/YYYY-MM-DD/fail/
+data/inspections/YYYY-MM-DD/review/
+data/inspections/YYYY-MM-DD/system_error/
+```
+
+Inspection evidence saving is off by default to preserve current storage behavior. Existing review-image folders remain unchanged and remain the primary retraining evidence path.
 
 ## Testing Without Raspberry Pi Hardware
 

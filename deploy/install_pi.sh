@@ -55,7 +55,7 @@ mkdir -p \
 
 sudo install -m 0644 "$SCRIPT_DIR/vision.service" "$SERVICE_FILE"
 sudo sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$PROJECT_DIR|" "$SERVICE_FILE"
-sudo sed -i "s|^ExecStart=.*|ExecStart=$PROJECT_DIR/.venv/bin/python -m app.runtime.detector_service --profile yellow_daifuku --camera-backend picamera2 --host 0.0.0.0 --port 8000 --imgsz 256 --frame-width 640 --frame-height 480 --inference-interval-ms 300|" "$SERVICE_FILE"
+sudo sed -i "s|^ExecStart=.*|ExecStart=$PROJECT_DIR/.venv/bin/python -m app.runtime.detector_service --profile yellow_daifuku --camera-profile pi_camera3 --camera-backend picamera2 --prefer-edge-model --model-format auto --host 0.0.0.0 --port 8000 --frame-width 640 --frame-height 480 --inference-interval-ms 300|" "$SERVICE_FILE"
 sudo sed -i "s|^User=.*|User=$SERVICE_USER|" "$SERVICE_FILE"
 sudo sed -i "s|^Group=.*|Group=$SERVICE_GROUP|" "$SERVICE_FILE"
 
@@ -66,5 +66,5 @@ echo
 echo "Next commands:"
 echo "  source \"$PROJECT_DIR/.venv/bin/activate\""
 echo "  python -m app.runtime.health_check --mode pi --profile yellow_daifuku --camera-backend picamera2"
-echo "  python -m app.runtime.detector_service --profile yellow_daifuku --camera-backend picamera2 --host 0.0.0.0 --port 8000 --imgsz 256 --frame-width 640 --frame-height 480 --inference-interval-ms 300"
+echo "  python -m app.runtime.detector_service --profile yellow_daifuku --camera-profile pi_camera3 --camera-backend picamera2 --prefer-edge-model --model-format auto --host 0.0.0.0 --port 8000 --frame-width 640 --frame-height 480 --inference-interval-ms 300"
 echo "  deploy/start_service.sh"

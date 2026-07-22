@@ -42,10 +42,19 @@ class OutputManager:
         simulation_mode=False,
     ):
         return {
+            "inspection_id": detection.get("inspection_id"),
+            "inspection_state": detection.get("inspection_state"),
             "inspection_result": detection.get("inspection_result", "NO_PART"),
             "pass_fail_bool": detection.get("pass_fail_bool"),
             "active_class": detection.get("active_class") or detection.get("class_name"),
             "confidence": detection.get("confidence"),
+            "average_confidence": detection.get("average_confidence"),
+            "agreement_ratio": detection.get("agreement_ratio"),
+            "image_quality_status": (
+                (detection.get("image_quality") or {}).get("quality_status")
+                if isinstance(detection.get("image_quality"), dict)
+                else None
+            ),
             "timestamp": detection.get("timestamp") or datetime.now().isoformat(timespec="seconds"),
             "profile": active_profile,
             "camera_status": camera_status,

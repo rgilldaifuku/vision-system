@@ -184,11 +184,12 @@ python -m app.runtime.detector_service \
   --model-format auto \
   --host 0.0.0.0 \
   --port 8000 \
-  --imgsz 256 \
   --frame-width 640 \
   --frame-height 480 \
   --inference-interval-ms 300
 ```
+
+Leave `--imgsz` unset for normal NCNN deployment so the runtime uses the exported model size from `metadata.yaml`.
 
 Open the dashboard from another machine:
 
@@ -278,8 +279,21 @@ journalctl -u vision.service -f
 The service template uses Picamera2 by default:
 
 ```text
---profile yellow_daifuku --camera-backend picamera2 --host 0.0.0.0 --port 8000 --imgsz 256 --frame-width 640 --frame-height 480 --inference-interval-ms 300
+--profile yellow_daifuku --camera-profile pi_camera3 --camera-backend picamera2 --prefer-edge-model --model-format auto --host 0.0.0.0 --port 8000 --frame-width 640 --frame-height 480 --inference-interval-ms 300
 ```
+
+## Inspection Events, Health, And Notifications
+
+The Pi runtime preserves the existing `inspection_result` values and adds canonical integration states: `PASS`, `FAIL`, `REVIEW`, `NO_PART`, and `SYSTEM_ERROR`. `/status`, `/latest_detection`, `latest_status.json`, and the dashboard include the current `inspection_id`, canonical state, agreement ratio, image-quality status, health, recent events, and notification status.
+
+Optional inspection evidence files, when enabled:
+
+```text
+data/logs/events.jsonl
+data/inspections/YYYY-MM-DD/<state>/
+```
+
+Notifications are off unless `VISION_NOTIFICATIONS_ENABLED` is set. Email and Teams credentials are read from environment variables such as `VISION_SMTP_HOST`, `VISION_EMAIL_TO`, and `VISION_TEAMS_WEBHOOK_URL`; missing values never stop the runtime.
 
 ## Troubleshooting
 
