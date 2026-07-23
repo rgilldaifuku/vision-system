@@ -332,6 +332,8 @@ Runtime `/status` now includes:
 - `events`
 - `notifications`
 
+`/health` disk usage reports `free_pct` as a human percent from `0` to `100`. For example, `0.879` means `0.879%` free, and the default low-disk warning threshold is `5.0` percent free.
+
 Review/debug/model-test images get a matching `.json` sidecar with model/profile, detections, image quality, preprocessing, ROI, and result metadata. These sidecars make the retraining loop easier: collect evidence, label hard cases, retrain on desktop, export NCNN, redeploy to Pi.
 
 Validation commands:

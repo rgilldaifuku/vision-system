@@ -1,8 +1,10 @@
 import json
+import shutil
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -18,6 +20,7 @@ from app.runtime.inspection_result import (
     generate_inspection_id,
 )
 from app.runtime.notification_manager import NotificationManager
+from app.runtime.action_manager import ActionManager
 
 
 class RuntimeInspectionHardeningTests(unittest.TestCase):
@@ -169,6 +172,18 @@ class RuntimeInspectionHardeningTests(unittest.TestCase):
         self.assertFalse(result["sent"])
         self.assertEqual(result["reason"], "notifications_disabled")
 
+    def test_simulation_action_counter_increments(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ActionManager(status_path=Path(tmpdir) / "latest_status.json")
+            result = manager.handle(
+                {
+                    "inspection_result": "SIMULATION",
+                    "profile": "yellow_daifuku",
+                    "message": "Simulation mode is active.",
+                }
+            )
+        self.assertEqual(result["counters"]["simulation"], 1)
+
     def test_missing_notification_credentials_do_not_crash(self):
         manager = NotificationManager(enabled=True)
         manager.email_enabled = True
@@ -214,6 +229,20 @@ class RuntimeInspectionHardeningTests(unittest.TestCase):
         self.assertEqual(healthy["status"], HEALTHY)
         self.assertEqual(degraded["status"], DEGRADED)
         self.assertEqual(unhealthy["status"], UNHEALTHY)
+
+    def test_disk_free_pct_uses_percent_units(self):
+        usage = shutil._ntuple_diskusage(total=200, used=198, free=2)
+        with mock.patch("app.runtime.health_monitor.shutil.disk_usage", return_value=usage):
+            monitor = HealthMonitor(startup_time=time.monotonic(), min_free_disk_pct=5.0)
+            snapshot = monitor.snapshot(
+                camera_connected=True,
+                model_loaded=True,
+                latest_frame_time=time.perf_counter(),
+                data_path=Path.cwd(),
+            )
+        self.assertEqual(snapshot["disk"]["free_pct"], 1.0)
+        self.assertEqual(snapshot["status"], DEGRADED)
+        self.assertIn("Free disk space is low.", snapshot["warnings"])
 
     def test_status_preserves_old_fields_and_adds_new_sections(self):
         service = detector_service.RuntimeDetectorService(
