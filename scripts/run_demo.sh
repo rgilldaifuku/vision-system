@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DRY_RUN_ARGS=()
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -15,7 +13,6 @@ PROFILE="${VISION_MODEL_PROFILE:-yellow_daifuku}"
 HOST="${VISION_HOST:-127.0.0.1}"
 PORT="${VISION_PORT:-8000}"
 CAMERA_SOURCE="${VISION_CAMERA_SOURCE:-}"
-DRY_RUN_ARGS=()
 
 if [ -z "$CAMERA_SOURCE" ]; then
   if [ -f "samples/test.jpg" ]; then
@@ -34,30 +31,33 @@ if [ -z "$CAMERA_SOURCE" ]; then
   exit 1
 fi
 
+ARGS=(
+  .venv/bin/python -m app.runtime.detector_service
+  --profile "$PROFILE"
+  --camera-source "$CAMERA_SOURCE"
+  --host "$HOST"
+  --port "$PORT"
+  --imgsz "${VISION_IMGSZ:-256}"
+  --frame-width "${VISION_FRAME_WIDTH:-424}"
+  --frame-height "${VISION_FRAME_HEIGHT:-240}"
+  --inference-interval-ms "${VISION_INFERENCE_INTERVAL_MS:-300}"
+)
+
 if [ "${VISION_FORCE_DRY_RUN:-}" = "1" ] || [ "${VISION_FORCE_DRY_RUN:-}" = "true" ]; then
-  DRY_RUN_ARGS=(--dry-run)
+  ARGS+=(--dry-run)
 elif [ ! -f "models/$PROFILE/best.pt" ] && [ ! -f "models/$PROFILE/latest/best.pt" ]; then
-  DRY_RUN_ARGS=(--dry-run)
+  ARGS+=(--dry-run)
 fi
 
 echo "Starting local vision demo"
 echo "  Profile: $PROFILE"
 echo "  Camera source: $CAMERA_SOURCE"
 echo "  Dashboard: http://$HOST:$PORT"
-if [ "${#DRY_RUN_ARGS[@]}" -gt 0 ]; then
+if [[ " ${ARGS[*]} " == *" --dry-run "* ]]; then
   echo "  Mode: dry-run simulation"
 else
   echo "  Mode: simulated camera with real model"
 fi
 echo
 
-exec .venv/bin/python -m app.runtime.detector_service \
-  --profile "$PROFILE" \
-  --camera-source "$CAMERA_SOURCE" \
-  --host "$HOST" \
-  --port "$PORT" \
-  --imgsz "${VISION_IMGSZ:-256}" \
-  --frame-width "${VISION_FRAME_WIDTH:-424}" \
-  --frame-height "${VISION_FRAME_HEIGHT:-240}" \
-  --inference-interval-ms "${VISION_INFERENCE_INTERVAL_MS:-300}" \
-  "${DRY_RUN_ARGS[@]}"
+exec "${ARGS[@]}"
